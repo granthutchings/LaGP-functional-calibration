@@ -1,0 +1,271 @@
+---
+title: "Ball Drop Example, No Bias"
+author: "Grant Hutchings"
+date: "2/23/2022"
+output: pdf_document
+---
+
+```{r setup, echo=F, include=FALSE}
+knitr::opts_knit$set(root.dir = "~/Desktop/laGP Project/examples/ballDrop")
+```
+
+```{r depends, echo=F, include=FALSE}
+library(reticulate)
+library(parallel)
+source("../../mv_calib_lagp.R")
+```
+
+In this example we consider the experiment of dropping different sized balls from a tower and recording the time at certain distances during the fall. We will generate time data at distance traveled d from the equation
+\[
+t(d) = \frac{acosh(\exp\{Cd/R\})}{\sqrt{Cg/R}}
+\]
+where $C$ is the coefficient of drag, $R$ is the radius of the ball, and $g$ is the gravitational constant. We will generate both field observations and computer simulation data from this function. Five sets of field observations will use the values $C=.1,\;g=9.8$ and $R=\{.05,.1,.15,.2,.25\;(m)\}$, while computer simulations will be evaluated over a space filling design of $(R,C,g)$ tuples in the domain $R\in(.025,.3),\;C\in(.05,.15),\;g\in(7.8,10.8)$. The drag coefficient and the gravitational constant are parameters to be calibrated while $R$ is a controlled input.
+
+During this tutorial we will detail how to do emulation, calibration, and prediction using our library functions.
+
+```{r , echo=FALSE}
+C_true = .1
+g_true = 9.8
+sd_true = .1 # sd of observation error
+# try making up a function where C,g have no interplay (additive)
+t_at_h = function(C,h,R,g){
+  return(acosh(exp(C*h/R))/sqrt(C*g/R))
+}
+
+pX = 1
+pT = 2
+n = 5; reps = 1
+m = 25
+nPC = 2
+
+# sim data
+set.seed(11)
+XTsim = tgp::lhs(m,matrix(c(.025,.3, # cover range of Xobs
+                            C_true-.05,C_true+.05, # cover C_true
+                            g_true-2,g_true+2),nrow=pX+pT,ncol=2,byrow = T)) # cover g_true
+Xsim=as.matrix(XTsim[,1])
+Tsim=as.matrix(XTsim[,2:3])
+YindSim = as.matrix(seq(.5,25,1.5))
+Ysim = matrix(nrow=length(YindSim),ncol=m)
+for(i in 1:m){
+  Ysim[,i] = t_at_h(C=Tsim[i,1],h=YindSim,R=Xsim[i],g=Tsim[i,2])
+}
+# obs data
+Xobs = as.matrix(rep(seq(.05,.25,length.out=n),reps))
+YindObs = as.matrix(c(5,10,15,20))
+Yobs = matrix(nrow=length(YindObs),ncol=n*reps)
+Ytrue = matrix(nrow=length(YindObs),ncol=n*reps)
+
+k = 0
+for(i in 1:n){
+  for(j in 1:reps){
+    k = k+1
+    Ytrue[,k] = t_at_h(C=C_true,h=YindObs,R=Xobs[k],g=g_true)
+    Yobs[,k] = Ytrue[,k] + rnorm(nrow(Yobs),0,sd_true)
+  }
+}
+```
+
+First, lets visualize our experiments and simulations. We have the five experiments shown in black, where time observations are recorded at four distances, 5, 10, 15, and 20 meters from the drop. White noise is added to the data with $\sigma_y=.1$. Our computer model is evaluated on a much denser grid of distances; every 1.5 seconds from .5 seconds to 24.5. Below we see the height time curves for both simulation and experiment. Our simulations cover the range of experiment, which is desirable so that our emulator does not have to extrapolate.
+
+# Step 0: Pre-scale data
+
+The first step for using our package is to pre-scale the data. We scale all inputs to the computer model to lie in the unit interval. We will denote controllable inputs as $x$ and calibration parameters at $t$. Here we have $x = \{R\}$ and $t=\{C,g\}$. Scaling to the unit interval is done using the function `transform_xt()` which accepts at minimum a matrix `Xsim` which has, as columns, the $R$ (controllable inputs) values passed into the simulator. In an emulation only problem `Xsim` is all we need. Here we are interested in calibration as well so we pass in a matrix `Tsim`, which has as columns the $C,g$ values used to generate our simulated data. In this example we have $m=25$ simulations so $\texttt{Xsim}\in\mathbb{R}^{m \times 1}$ and $\texttt{Tsim}\in\mathbb{R}^{25 \times 2}$. We also pass in a matrix $\texttt{Xobs}\in\mathbb{R}^{n \times 1}$ which contains the $n$ experimental values of $R$. Additionally, for testing problems where the true value of the calibration parameters are known, a matrix `Tobs` can be passed to the function. The purpose of this is to have a stored copy of the true parameter values scaled similarly to `Tsim`.
+
+Next we will scale the computer simulation outputs $\texttt{Ysim}\in\mathbb{R}^{n_s\times m}$ where $n_s$ is length of the simulation height-time curves (i.e. the number of distances we have time measurements for). We also scale `Yobs` using the scaling determined by `Ysim.` We scale the simulations so that at each distance location, the times are mean zero and unit variance. Responses are scaled using the function `transform_y` which accepts the simulator data `Ysim` as well as a matrix of the locations (distances) where the observations are taken `YindSim`. Similarly for the field observations we pass in $\texttt{Yobs}\in\mathbb{R}^{n_y \times n},\texttt{YindObs}\in\mathbb{R}^{n_y \times 1}$ where $n_y$ is the number of distances for which times are recorded. The function also accepts arguments which control the type of scaling. `center` and `scale` are flags indicating if the data should be centered to mean zero and scaled to variance one. `scaletype` can be one of 'columnwise' or 'scalar'. Columnwise scales each location to be variance one, and scalar scales the entire suite of simulations to be variance one. We recommend using columnwise scaling unless there is a location with no variability, meaning we cannot divide by the standard error at that location.
+
+```{r data transformations}
+XTdata = transform_xt(Xsim,Tsim,Xobs)
+Ydata = transform_y(Ysim,YindSim,Yobs,YindObs,center = T,scale = T, scaletype='columnwise')
+```
+
+```{r , echo=F}
+#print('[Xsim,Tsim]:');cbind(Xsim,Tsim)
+#print('Xobs:');Xobs
+obs_ids = mclapply(1:n, function(i) seq(i,dim(Ydata$obs$orig)[2],n))
+obs_means = mclapply(1:n, function(i) apply(Ydata$obs$orig[,obs_ids[[i]],drop=F],1,mean))
+```
+
+
+```{r data vis, echo=FALSE}
+matplot(YindSim,Ydata$sim$orig,type='l',col='orange',xlab='distance (m)',ylab='time (s)')
+matplot(YindObs,Ydata$obs$orig,pch=1,add=T,col='black')
+matplot(YindObs,Ydata$obs$orig,type='l',lty=1,add=T,col='black')
+legend('topleft',inset=c(.05,.05),legend=c('simulations','field observations'),lty=1,col=c('orange','black'))
+```
+
+# Step 1: get basis
+
+Next we decompose our data using an orthogonal basis decomposition, namely the singular value decomposition. We first create a basis for our simulations using the function `get_basis()` which accepts our simulator responses that have already been scaled by `transform_xt()` as well as `nPC`, the number of basis vectors to use. If you do not know a-priori how many basis vectors you would like to use, the parameter $\texttt{pctVar}\in(0,1)$ can be specified indicating that the decomposition should retain enough basis vectors to account for a certain percentage of the variability in the data. We then generate the basis for the field observations, using the basis for the simulations with the function `get_obs_basis`. At this point you will recognize all the inputs to this function except for `sigY`. This value defaults to one, and has no effect if not specified. If one has an idea of the error variance for the field observations this can be passed in here and will be used when producing basis vectors.
+```{r}
+simBasis = get_basis(Ydata$sim$trans,nPC,pctVar=NULL)
+obsBasis = get_obs_basis(simBasis,Ydata$obs$trans,YindSim,YindObs,sigY=ifelse(sd_true>0,sd_true^2,1))
+```
+
+It may be useful to visualize the basis weights for both the simulations and the observations. We see that some of the weights from the field observations are not within the cloud of weights from the simulator. This is not ideal as our models will be doing some extrapolation to predict the observed data.
+
+```{r}
+plot_wz_pairs(simBasis$Vt,obsBasis$Vt,legend=T)
+```
+
+```{r , echo=FALSE}
+BtBinv = solve(t(obsBasis$B)%*%obsBasis$B + diag(1e-8,nPC))
+```
+
+# Step 2: get lengthscale estimates and stretch + compress input space
+
+Next we will globally estimate length-scale parameters for the laGP models using a subset of the simulations. This is done using the function `mv_lengthscales()` which accepts the output from `transform_xt()` as well as the simulation basis weights. Lastly you can specify a value for the nugget, we use `g` in accordance with the laGP package. These global length-scale estimates are a key aspect of the model. The inputs are scaled according to these inputs, which eliminates the need for future length-scale estimation during emulation and calibration, greatly increasing speed. We use the function `get_SC_inputs()` to scale the inputs. This function accepts the outputs from `mv_lengthscales()` and `transform_xt()` and returns an object similar to `XTdata`, but containing scaled inputs.
+
+```{r }
+estLS = mv_lengthscales(XTdata,simBasis$Vt,g=1e-7)
+SCinputs = get_SC_inputs(estLS,XTdata,nPC)
+```
+
+# Step 3: calibrate over grid of t values
+
+Now we can calibrate over a grid of possible $(C,g)$ pairs. Since our inputs are scaled to the unit hypercube, we will take a simple uniformly space grid over the unit square. In the future we will evaluate our calibration on a small space filling design, then use those results as initial values for a much more sophisticated optimization routine. We do this initial calibration over a user defined set of $(C,g)$ values using the function `mv.calib.nobias()` the parameters to this function have all been discussed above. We show the likelihood over the range of potential calibration parameters as well as the maximum likelihood estimate. In this case, the reason the ML estimate is not equal to the true value is because the data is noisy. If the data was noise-free, and the emulator truly unbiased, as it is here, we should get a ML estimate equal to the true value.
+
+```{r , echo=F}
+nT = 21*21
+ux = seq(.01,.99,length.out=as.integer(sqrt(nT)))
+tCalib = expand.grid(ux,ux)
+# calib = mv.calib.nobias(tCalib = tCalib,
+#                         SCinputs,
+#                         estLS,
+#                         Ydata,
+#                         simBasis$Vt,
+#                         obsBasis,
+#                         BtBinv,
+#                         thetaHat=T)
+calib = mv.calib.nobias_yllh(tCalib = tCalib,
+                      SCinputs,
+                      estLS,
+                      Ydata,
+                      simBasis$Vt,
+                      obsBasis,
+                      thetaHat=T)
+ggplot(calib$ll_df, aes(x = theta1, y = theta2, col = ll)) +
+     geom_point(size = 3) +
+     scale_color_viridis_c() + geom_point(aes(x=calib$theta.hat[1],y=calib$theta.hat[2]),col='red',size=1) +
+     geom_point(aes(x=.5,y=.5),col='black',size=1) + ggtitle('')
+```
+
+Estimate of error variance is a little high.
+
+```{r, echo=F}
+cat('True error variance     :',sd_true^2,
+    '\nEstimated error variance:',calib$ssq.hat.orig)
+```
+
+# Prediction at observed locations
+
+We use the function `mv.em.pred()` to make predictions from our emulator at the chosen $t^*$. Here we are interested in how well we can predict the observed data. This is useful metric since the emulator was not trained on the observed data, the only way the observed data influences these predictions is in the choice of calibration parameters. This function accepts a matrix of inputs for prediction, in this case `Xobs`, the length-scale estimates `estLS`, and the transformed simulation inputs stored in `XTdata` as well as the simulation responses `simBasis$Vt`. We can then pass the emulator Gaussian Process information into the function `yPred.nobias` to predict on the original scale. This function also needs an estimate of the error variance, and the observed basis vectors to case samples of the basis weights to the original scale.
+
+```{r}
+emGPs = mv.em.pred(calib$theta.hat.orig,Xobs[1:n,,drop=F],estLS,XTdata,simBasis$Vt)
+Ypred = yPred.nobias(emGPs$GPs,calib$ssq.hat,obsBasis$B,BtBinv,nsamples=1000,Ydata$obs,ysamp=F)
+```
+```{r , echo=F}
+for(i in 1:n){
+  matplot(YindObs[,1],Ydata$obs$orig[,obs_ids[[i]],drop=F],pch=1,col=i+1,add=ifelse(i==1,F,T),ylim=c(0,10),
+          xlab='distance',ylab='time',main='')
+  points(YindObs[,1],Ytrue[,i],col='black')
+  lines(YindObs[,1],Ypred$YMean[,i],col=i+1)
+  lines(YindObs[,1],Ypred$YInt[[i]][,1],type='l',col=i+1,lty=2)
+  lines(YindObs[,1],Ypred$YInt[[i]][,2],type='l',col=i+1,lty=2)
+}
+legend('topleft',inset=c(.05,.05),legend=paste0('Mean Pred SD: ',round(mean(sqrt(Ypred$YVar)),4)))
+```
+
+### We can similarly predict by directly sampling Y rather than sampling w and transforming through the basis.
+
+Above we used the function `yPred.nobias` with the flag `ysamp=F`. In that case we get samples of basis weights from the sampling distribution
+\[
+z \sim N\big(\mu_w,\hat{\sigma}^2_y(B^TB)^{-1} + \Sigma_w \big)
+\]
+But, we could also sample from
+\[
+Y \sim N\big(B\mu_w,B\Sigma_wB^T + \hat{\sigma}^2_yI\big)
+\]
+Which for some reason increases our predictive variability. I believe I understand now why the predictive variances are different, but I'm not sure what the solution is. Consider the following
+\[
+\begin{aligned}
+Bz & \sim B\mathcal{N}(\mu_w,\Sigma_w) + \mathcal{N}(0,\sigma^2I) & (1) \\
+z & \sim \mathcal{N}(\mu_w,\Sigma_w) + (B^TB)^{-1}B^T\mathcal{N}(0,\sigma^2I) & (2) \\
+Bz & \sim B\mathcal{N}(\mu_w,\Sigma_w) + B(B^TB)^{-1}B^T\mathcal{N}(0,\sigma^2I) & (3)
+\end{aligned}
+\]
+(1) and (3) are equivalent iff $B(B^TB)^{-1}B^T=I$ which we might expect to be true as $B$ came from SVD and is the product of an orthogonal matrix and a diagonal matrix. It turns out that $B(B^TB)^{-1}B^T=I$ if we use all the columns of $B$, but not if we use only the first nPC columns. For this reason we are getting different predictive variances.
+
+```{r obs predictions, echo=F}
+#emGPs = mv.em.pred(calib$theta.hat.orig,Xobs[1:n,,drop=F],estLS,XTdata,simBasis$Vt)
+Ypred = yPred.nobias(emGPs$GPs,calib$ssq.hat,obsBasis$B,BtBinv,nsamples=1000,Ydata$obs,ysamp=T)
+for(i in 1:n){
+  matplot(YindObs[,1],Ydata$obs$orig[,obs_ids[[i]],drop=F],pch=1,col=i+1,add=ifelse(i==1,F,T),ylim=c(0,10),
+          xlab='distance',ylab='time',main='')
+  points(YindObs[,1],Ytrue[,i],col='black')
+  lines(YindObs[,1],Ypred$YMean[,i],col=i+1)
+  lines(YindObs[,1],Ypred$YInt[[i]][,1],type='l',col=i+1,lty=2)
+  lines(YindObs[,1],Ypred$YInt[[i]][,2],type='l',col=i+1,lty=2)
+}
+legend('topleft',inset=c(.05,.05),legend=paste0('Mean Pred SD: ',round(mean(sqrt(Ypred$YVar)),4)))
+```
+
+# Prediction at new location that was not included for calibration
+
+```{r new Y prediction, echo=F}
+XobsNew = as.matrix(rep(.075,reps))
+YobsNew = matrix(nrow=length(YindObs),ncol=reps)
+for(j in 1:reps){
+  YobsNew[,j] = t_at_h(C=C_true,h=YindObs,R=XobsNew[j],g=g_true) + rnorm(nrow(YobsNew),0,sd_true)
+}
+
+matplot(YindSim,Ysim,col='orange',type='l',lty=2,ylab='time',xlab='distance',main='')
+matplot(YindObs,Yobs,col='black',type='b',lty=1,pch=1,add=T)
+matplot(YindObs,YobsNew,col='green',type='b',lty=1,pch=1,add=T)
+
+XTdataNew = transform_xt(Xsim,Tsim,XobsNew)
+YdataNew = transform_y(Ysim,YindSim,YobsNew,YindObs,center = T,scale = T)
+obsBasisNew = get_obs_basis(simBasis,YdataNew$obs$trans,YindSim,YindObs,sigY=ifelse(sd_true>0,sd_true^2,1))
+BtBinvNew = solve(t(obsBasisNew$B)%*%obsBasisNew$B + diag(1e-8,nPC))
+
+SCinputsNew = get_SC_inputs(estLS,XTdataNew,nPC)
+
+emGPsNew = mv.em.pred(calib$theta.hat.orig,XobsNew,estLS,XTdataNew,simBasis$Vt)
+YpredNew = yPred.nobias(emGPsNew$GPs,calib$ssq.hat,
+                    obsBasisNew$B,BtBinvNew,nsamples=1000,YdataNew$obs,ysamp=F)
+
+matplot(YindObs,YdataNew$obs$orig,pch=1,col='black',
+        xlab='distance',ylab='time',main='',ylim=c(0,15))
+#points(YindObs[,1],Ytrue[,i],col='black')
+lines(YindObs[,1],YpredNew$YMean,col='green')
+lines(YindObs[,1],YpredNew$YInt[[1]][,1],type='l',col='green',lty=2)
+lines(YindObs[,1],YpredNew$YInt[[1]][,2],type='l',col='green',lty=2)
+legend('topleft',inset=c(.05,.05),legend=paste0('Mean Pred SD: ',round(mean(sqrt(YpredNew$YVar)),4)))
+```
+
+```{r manual predictions, echo=F}
+wMean = emGPsNew$GPs$wMean; wVar = emGPsNew$GPs$wVar
+ssq.hat = calib$ssq.hat
+B = obsBasisNew$B
+nY = nrow(YindObs)
+nsamples=1000
+
+Ysamp = (B%*%t(mvtnorm::rmvnorm(nsamples,mean=wMean[,1,drop=F],sigma =diag(wVar[,1]))) + 
+    t(mvtnorm::rmvnorm(nsamples,sigma=ssq.hat*eye(nY)))) #* YdataNew$obs$sd + YdataNew$obs$mean
+Yvar = apply(Ysamp,1,var)
+#round(mean(sqrt(Yvar)),4)
+
+Ysamp2 = B%*%BtBinvNew%*%t(B)%*%Ysamp
+Yvar2 = apply(Ysamp2,1,var)
+#round(mean(sqrt(Yvar2)),4)
+
+Ysamp3 = B%*%t(mvtnorm::rmvnorm(nsamples,mean=wMean[,1,drop=F],sigma =diag(wVar[,1])+ssq.hat*BtBinvNew))
+Yvar3 = apply(Ysamp3,1,var)
+#round(mean(sqrt(Yvar3)),4)
+
+Ysamp4 = (B%*%t(mvtnorm::rmvnorm(nsamples,mean=wMean[,1,drop=F],sigma =diag(wVar[,1]))) + 
+    B%*%BtBinvNew%*%t(B)%*%t(mvtnorm::rmvnorm(nsamples,sigma=ssq.hat*eye(nY)))) #* YdataNew$obs$sd + YdataNew$obs$mean
+Yvar4 = apply(Ysamp4,1,var)
+#round(mean(sqrt(Yvar4)),4)
+```

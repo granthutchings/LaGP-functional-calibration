@@ -1,0 +1,162 @@
+---
+title: "Implosion_bias"
+author: "Grant Hutchings"
+date: "2/23/2022"
+output: pdf_document
+---
+
+```{r setup, echo=F, include=F}
+knitr::opts_knit$set(root.dir = "~/Desktop/laGP Project/examples/Implosion")
+```
+
+```{r depends, echo=F}
+library(reticulate)
+source_python('SepiaImplosionExperimentData.py')
+source('../../mv_calib_lagp.R')
+
+plot_surf = function(Z,times,angles,shade=0,zlim=c(0,1),add=F,col='white',alpha=.5,
+                     phi=15,theta=60){
+  ntimes = length(times)
+  nangles = length(angles)
+  Z = matrix(Z,ntimes,nangles,byrow = T)
+  #par(new=add)
+  persp3D(times,angles,Z,
+          phi=phi,theta=theta,
+          shade=shade,zlim=zlim,col=col,add=add,alpha=alpha,
+          ltheta = theta-90, lphi = phi-45,
+          xlab='time',ylab='angle',zlab='radius')
+}
+```
+
+```{r, echo=FALSE}
+m = 36
+n_times = 22
+n_angles = 26
+pX = 1
+pT = 2
+nPC = 3
+sd_true = 0
+
+Xsim = data_dict$Xsim
+Tsim = data_dict$Tsim
+Ysim = t(data_dict$Ysim)
+YsimPlot = array(t(Ysim),dim=c(m,n_times,n_angles))
+YsimPlot = YsimPlot[,,1]
+YindSim = data_dict$YindSim
+
+n = 3; reps = 1
+n_obs_times = 3
+n_obs_angles = 16
+Xobs = as.matrix(rep(data_dict$Xobs[1:n,],reps))
+Tobs = matrix(rep(.5,2*n*reps),nrow=n*reps,ncol=pT)
+tmp = data_dict$Yobs
+Yobs = matrix(nrow=n_obs_times*n_obs_angles,ncol=n*reps)
+YindObs = data_dict$YindObs[[1]]
+nY = nrow(YindObs)
+set.seed(11)
+k = 0
+for(j in 1:reps){
+  for(i in 1:n){
+    k = k+1
+    Yobs[,k] = tmp[[i]]
+  }
+}
+YobsNew = as.matrix(tmp[[n+1]])
+# add bias
+angle_effect = function(angle) {
+  a = (4 / (5 * pi))
+  b = (8 / (5 * pi^2))
+  mod_angle = (angle %% (pi / 2))
+  return(1 - a * mod_angle + b * mod_angle^2)
+}
+angle_bias = angle_effect(YindObs[,2])
+for(i in 1:n){
+  Yobs[,i] = Yobs[,i]+angle_bias+rnorm(nY,0,sd_true)
+}
+YobsNew = YobsNew + angle_bias + rnorm(nY,0,sd_true)
+```
+
+```{r, echo=FALSE}
+par(mfrow=c(2,2), mai = c(0.1, 0.1, 0.1, 0.1))
+for(i in 1:n){
+  plot_surf(Yobs[,i],time_obs[[i]],phi_obs,shade=.01,zlim=c(1,3.5),alpha=.5,col='black')
+}
+plot_surf(YobsNew,time_obs[[i]],phi_obs,shade=.01,zlim=c(1,3.5),alpha=.5,col='blue')
+par(mfrow=c(1,1))
+```
+
+```{r, echo=FALSE}
+XTdata = transform_xt(Xsim,Tsim,Xobs,Tobs)
+Ydata = transform_y(Ysim,YindSim,Yobs,YindObs,center = T,scale = T, scaletype='scalar')
+obs_ids = mclapply(1:n, function(i) seq(i,dim(Ydata$obs$orig)[2],n))
+
+simBasis = get_basis(Ydata$sim$trans,nPC)
+
+obsBasis = get_obs_basis(simBasis,Ydata$obs$trans,YindSim,YindObs,sigY=ifelse(sd_true>0,sd_true^2,1))
+BtBinv = solve(t(obsBasis$B)%*%obsBasis$B + diag(1e-10,nPC))
+# testthat::expect_equal(obsBasis$B%*%obsBasis$Vt,Ydata$obs$trans,check.attributes = FALSE)
+
+estLS = mv_lengthscales(XTdata,simBasis$Vt,g=1e-7)
+# stretch and compress inputs
+SCinputs = get_SC_inputs(estLS,XTdata,nPC)
+```
+
+```{r, echo=FALSE}
+nT = 13^2
+ux = seq(.01,.99,length.out=as.integer(sqrt(nT)))
+tCalib = expand.grid(ux,ux)
+calib.bias = mv.calib.bias(tCalib,
+         SCinputs,
+         estLS,
+         Ydata,
+         simBasis$Vt,
+         obsBasis,
+         thetaHat = T)
+ggplot(calib.bias$ll_df, aes(x = theta1, y = theta2, col = ll)) +
+  geom_point(size = 3) +
+  scale_color_viridis_c() + geom_point(aes(x=calib.bias$theta.hat[1],y=calib.bias$theta.hat[2]),col='red',size=1) +
+  geom_point(aes(x=.5,y=.5),col='black',size=1) + ggtitle('disc in Y\'s')
+```
+
+Predictions 1-3 are so good (overfit), because the discrepancy GP is fit on this data (interpolates).
+```{r , echo=F}
+Ypred = yPred.bias(calib.bias$theta.hat.orig,Xobs,estLS,XTdata,simBasis$Vt,calib.bias$dfit,obsBasis$B,1000)
+mean(sqrt(Ypred$YVar))
+YemMean = calib.bias$bias$emGPs$yMean * Ydata$obs$sd + Ydata$obs$mean
+YdiscMean = calib.bias$dfit$disc$basis$B %*% calib.bias$dfit$disc$wMean * Ydata$obs$sd
+par(mfrow=c(2,2), mai = c(0.1, 0.1, 0.1, 0.1))
+for(i in 1:n){
+  plot_surf(Ypred$YMean[,i],time_obs[[i]],phi_obs,shade=.1,zlim=c(0,max(Ypred$YMean[,i])),alpha=.75,col='blue')
+  plot_surf(YemMean[,i],time_obs[[i]],phi_obs,zlim=c(0,2),
+            shade = .01, add=T, col='lightblue',alpha=.5)
+  plot_surf(YdiscMean[,i],time_obs[[i]],phi_obs,zlim=c(0,2),
+            shade = .01, add=T, col='lightblue',alpha=.5)
+  plot_surf(Ydata$obs$orig[,i],time_obs[[i]],phi_obs,zlim=c(0,2),
+            shade = .001, add=T, col='orange', alpha=.5)
+  plot_surf(Ypred$YInt[[i]][,1],time_obs[[n+1]],phi_obs,zlim=c(0,2),
+          shade = .00001, add=T, col='lightgrey', alpha=.5)
+  plot_surf(Ypred$YInt[[i]][,2],time_obs[[n+1]],phi_obs,zlim=c(0,2),
+          shade = .00001, add=T, col='lightgrey', alpha=.5)
+}
+
+# out of sample fit
+XobsNew = as.matrix(data_dict$Xobs[n+1,])
+XTdataNew = transform_xt(Xsim,Tsim,XobsNew)
+YdataNew = transform_y(Ysim,YindSim,YobsNew,YindObs,center = T,scale = T)
+obsBasisNew = get_obs_basis(simBasis,YdataNew$obs$trans,YindSim,YindObs,sigY=ifelse(sd_true>0,sd_true^2,1))
+BtBinvNew = solve(t(obsBasisNew$B)%*%obsBasisNew$B + diag(1e-8,nPC))
+SCinputsNew = get_SC_inputs(estLS,XTdataNew,nPC)
+
+YpredNew = yPred.bias(calib.bias$theta.hat.orig,XobsNew,estLS,XTdataNew,simBasis$Vt,calib.bias$dfit,obsBasisNew$B,nsamples = 1000)
+plot_surf(YpredNew$YMean,time_obs[[n+1]],phi_obs,shade=.1,zlim=c(0,max(YpredNew$YMean)),alpha=.75,col='blue')
+plot_surf(YpredNew$emMean,time_obs[[n+1]],phi_obs,zlim=c(0,2),
+          shade = .01, add=T, col='lightblue',alpha=.5)
+plot_surf(YpredNew$discMean,time_obs[[n+1]],phi_obs,zlim=c(0,2),
+          shade = .01, add=T, col='lightblue',alpha=.5)
+plot_surf(YobsNew,time_obs[[n+1]],phi_obs,zlim=c(0,2),
+          shade = .001, add=T, col='orange', alpha=.5)
+plot_surf(YpredNew$YInt[[1]][,1],time_obs[[n+1]],phi_obs,zlim=c(0,2),
+          shade = .00001, add=T, col='lightgrey', alpha=.5)
+plot_surf(YpredNew$YInt[[1]][,2],time_obs[[n+1]],phi_obs,zlim=c(0,2),
+          shade = .00001, add=T, col='lightgrey', alpha=.5)
+```

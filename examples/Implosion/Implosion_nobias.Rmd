@@ -1,0 +1,174 @@
+---
+title: "Implosion Example, No Bias"
+author: "Grant Hutchings"
+date: "2/23/2022"
+output: pdf_document
+---
+
+```{r setup, echo=F, include=F}
+knitr::opts_knit$set(root.dir = "~/Desktop/laGP Project/examples/Implosion")
+```
+
+In the Neddermeyer experiments, steel cylinders were imploded using high explosive. In this example we reproduce the experiments by generating synthetic data. The system response is the inner radius of the cylinder, indexed over both time and angle. A more detailed overview of the experiements can be found in Higdon 08, and the data generating process can be found in 'SepiaImplosionExperimentData.py'. There is one controllable input to the system, the mass of high-explosive (HE) used, and two calibration inputs, the detonation energy per unit mass of HE, and the yield stress of steel. The observed data is generated with scaled inputs $X=[0.769,0.048,0.961,0.433]^T$ and $t^*=(.5,.5)$ for all experiments. The first three experiments will be used for calibration, and the last will be left an out-of-sample predictive test. 36 simulations are generated from a LHS over the unit cube for $(x,t_1,t_2)$.
+
+```{r depends, echo=F, include=F}
+library(reticulate)
+library(plot3D)
+source_python('SepiaImplosionExperimentData.py')
+source('../../mv_calib_lagp.R')
+
+plot_surf = function(Z,times,angles,shade=0,zlim=c(0,1),add=F,col='white',alpha=.5,
+                     phi=15,theta=60,main=''){
+  ntimes = length(times)
+  nangles = length(angles)
+  Z = matrix(Z,ntimes,nangles,byrow = T)
+  #par(new=add)
+  persp3D(times,angles,Z,
+          phi=phi,theta=theta,
+          shade=shade,zlim=zlim,col=col,add=add,alpha=alpha,
+          ltheta = theta-90, lphi = phi-45,
+          xlab='time',ylab='angle',zlab='radius',main=main)
+}
+```
+
+Here we consider the case where there is no angle effect. This means the inner radius of the cylinder is constant over angle, changing only in time. Our simulator uses the same data generating process as our observed data in this case.
+
+Below we show the simulations in green, the three experiments used for calibration in black, and the final hold-out experiment in blue. The observed data is shown before any noise is added.
+
+```{r, echo=FALSE}
+m = 36
+n_times = 22
+n_angles = 26
+pX = 1
+pT = 2
+nPC = 3
+sd_true = .1
+
+Xsim = data_dict$Xsim
+Tsim = data_dict$Tsim
+Ysim = t(data_dict$Ysim)
+YsimPlot = array(t(Ysim),dim=c(m,n_times,n_angles))
+YsimPlot = YsimPlot[,,1]
+YindSim = data_dict$YindSim
+
+n = 3; reps = 1
+n_obs_times = 3
+n_obs_angles = 16
+Xobs = as.matrix(rep(data_dict$Xobs,reps))[1:n,,drop=F]
+Tobs = matrix(rep(.5,2*n*reps),nrow=n*reps,ncol=pT)
+tmp = data_dict$Yobs
+Yobs = matrix(nrow=n_obs_times*n_obs_angles,ncol=n*reps)
+YindObs = data_dict$YindObs[[1]]
+nY = nrow(YindObs)
+set.seed(11)
+k = 0
+for(j in 1:reps){
+  for(i in 1:n){
+    k = k+1
+    Yobs[,k] = tmp[[i]] + rnorm(nY,0,sd_true)
+  }
+}
+YobsNew = as.matrix(tmp[[n+1]]) + rnorm(nY,0,sd_true)
+```
+
+```{r, echo=F}
+plot_id = c(1,17,33)
+matplot(time,t(YsimPlot),type='l',col='green',xlab='time (s)',ylab='inner radius',main='Implosion inner radius over time')
+for(i in 1:n){
+  points(time_obs[[i]],tmp[[i]][plot_id])
+  lines(time_obs[[i]],tmp[[i]][plot_id])
+}
+points(time_obs[[n+1]],tmp[[n+1]][plot_id],col='blue')
+lines(time_obs[[n+1]],tmp[[n+1]][plot_id],col='blue')
+```
+
+Here we plot the noisy experimental data. Although we are not using an angle effect, we add noise independently for each angle with $\sigma^y=.1$.
+
+```{r, echo=FALSE}
+par(mfrow=c(2,2), mai = c(0.1, 0.1, 0.1, 0.1))
+for(i in 1:n){
+  plot_surf(Yobs[,i],time_obs[[i]],phi_obs,shade=.01,zlim=c(0,2.5),alpha=.5,col='black')
+}
+plot_surf(YobsNew,time_obs[[i]],phi_obs,shade=.01,zlim=c(0,2.5),alpha=.5,col='blue')
+par(mfrow=c(1,1))
+```
+
+```{r, echo=FALSE}
+XTdata = transform_xt(Xsim,Tsim,Xobs,Tobs)
+Ydata = transform_y(Ysim,YindSim,Yobs,YindObs,center = T,scale = T, scaletype='scalar')
+obs_ids = mclapply(1:n, function(i) seq(i,dim(Ydata$obs$orig)[2],n))
+
+simBasis = get_basis(Ydata$sim$trans,nPC)
+
+obsBasis = get_obs_basis(simBasis,Ydata$obs$trans,YindSim,YindObs,sigY=ifelse(sd_true>0,sd_true^2,1))
+BtBinv = solve(t(obsBasis$B)%*%obsBasis$B + diag(1e-10,nPC))
+# testthat::expect_equal(obsBasis$B%*%obsBasis$Vt,Ydata$obs$trans,check.attributes = FALSE)
+
+estLS = mv_lengthscales(XTdata,simBasis$Vt,g=1e-7)
+# stretch and compress inputs
+SCinputs = get_SC_inputs(estLS,XTdata,nPC)
+```
+
+We calibrate using the methods described in laGP_calibration.pdf. The ML estimate $t^*$ is close to the truth of $t^*=(.5,.5)$.
+
+```{r, echo=FALSE}
+nT = 13^2
+ux = seq(.01,.99,length.out=as.integer(sqrt(nT)))
+tCalib = as.matrix(expand.grid(ux,ux))
+calib = mv.calib.nobias(tCalib,
+         SCinputs,
+         estLS,
+         Ydata,
+         simBasis$Vt,
+         obsBasis,
+         BtBinv,
+         thetaHat = T)
+ggplot(calib$ll_df, aes(x = theta1, y = theta2, col = ll)) +
+  geom_point(size = 3) +
+  scale_color_viridis_c() + geom_point(aes(x=calib$theta.hat[1],y=calib$theta.hat[2]),col='red',size=1) +
+  geom_point(aes(x=.5,y=.5),col='black',size=1) + ggtitle('Calibration likelihood')
+```
+
+Our estimate of the error variance is quite good.
+
+```{r, echo=F}
+cat('True error variance     :',sd_true^2,
+    '\nEstimated error variance:',round(calib$ssq.hat.orig,3))
+```
+
+In the plots below the noisy observed data is in orange. Predictive means are in black for the experiments used for calibration and blue for the holdout experiment. 95\% prediction intervals are gray. Predictive means and intervals seem appropriate. 
+
+```{r , echo=F}
+emPred = mv.em.pred(calib$theta.hat,Xobs[1:n,,drop=F],estLS,XTdata,simBasis$Vt)
+Ypred = yPred.nobias(emPred$GPs,calib$ssq.hat,obsBasis$B,BtBinv,1000,Ydata$obs, ysamp = T)
+#mean(sqrt(Ypred$YVar))
+
+par(mfrow=c(2,2), mai = c(0.1, 0.1, 0.1, 0.1))
+for(i in 1:n){
+  plot_surf(Ypred$YMean[,i],time_obs[[i]],phi_obs,shade=.1,zlim=c(0,max(Ypred$YMean[,i])),alpha=.75,col='black')
+  plot_surf(Ydata$obs$orig[,i],time_obs[[i]],phi_obs,zlim=c(0,2),
+            shade = .001, add=T, col='orange', alpha=.5)
+  plot_surf(Ypred$YInt[[i]][,1],time_obs[[n+1]],phi_obs,zlim=c(0,2),
+          shade = .0001, add=T, col='grey', alpha=.5)
+  plot_surf(Ypred$YInt[[i]][,2],time_obs[[n+1]],phi_obs,zlim=c(0,2),
+          shade = .0001, add=T, col='grey', alpha=.5)
+}
+
+# out of sample fit
+XobsNew = as.matrix(data_dict$Xobs[n+1,])
+XTdataNew = transform_xt(Xsim,Tsim,XobsNew)
+YdataNew = transform_y(Ysim,YindSim,YobsNew,YindObs,center = T,scale = T)
+obsBasisNew = get_obs_basis(simBasis,YdataNew$obs$trans,YindSim,YindObs,sigY=ifelse(sd_true>0,sd_true^2,1))
+BtBinvNew = solve(t(obsBasisNew$B)%*%obsBasisNew$B + diag(1e-8,nPC))
+SCinputsNew = get_SC_inputs(estLS,XTdataNew,nPC)
+
+emPredNew = mv.em.pred(calib$theta.hat,XobsNew,estLS,XTdataNew,simBasis$Vt)
+YpredNew = yPred.nobias(emPredNew$GPs,calib$ssq.hat,obsBasisNew$B,BtBinvNew,1000,YdataNew$obs,ysamp = T)
+plot_surf(YpredNew$YMean,time_obs[[n+1]],phi_obs,shade=.1,zlim=c(0,max(YpredNew$YMean)),alpha=.75,col='blue')
+plot_surf(YobsNew,time_obs[[n+1]],phi_obs,zlim=c(0,2),
+          shade = .001, add=T, col='orange', alpha=.5)
+plot_surf(YpredNew$YInt[[1]][,1],time_obs[[n+1]],phi_obs,zlim=c(0,2),
+          shade = .0001, add=T, col='grey', alpha=.5)
+plot_surf(YpredNew$YInt[[1]][,2],time_obs[[n+1]],phi_obs,zlim=c(0,2),
+          shade = .0001, add=T, col='grey', alpha=.5)
+```

@@ -1,0 +1,183 @@
+---
+title: "Ball Drop Example, Bias"
+author: "Grant Hutchings"
+date: "2/23/2022"
+output: pdf_document
+---
+```{r setup, echo=F, include=F}
+knitr::opts_knit$set(root.dir = "~/Desktop/laGP Project/examples/ballDrop")
+```
+
+```{r depends, echo=F,include=F}
+library(reticulate)
+library(parallel)
+source("../../mv_calib_lagp.R")
+```
+
+This example is an extension of the unbiased ball drop example where we now work with a biased simulator. We will generate our observations from the same function as before
+\[
+t(d) = \frac{acosh(\exp\{Cd/R\})}{\sqrt{Cg/R}}
+\]
+and our simulations from 
+\[
+t(d) = \frac{acosh(\exp\{Cd/R\})}{(Cg/R)^{1/4}}.
+\]
+
+```{r data, echo=F}
+C_true = .1
+g_true = 9.8
+sd_true = 0.1 # sd of observation error
+# try making up a function where C,g have no interplay (additive)
+t_at_h = function(C,h,R,g){
+  return(acosh(exp(C*h/R))/sqrt(C*g/R))
+}
+t_at_h_sim = function(C,h,R,g){
+  return(acosh(exp(C*h/R))/(C*g/R)^(1/4))
+}
+
+pX = 1
+pT = 2
+n = 5; reps = 1
+m = 36
+nPC = 2
+nT = 13*13
+bias = F
+
+# sim data
+set.seed(11)
+XTsim = tgp::lhs(m,matrix(c(.025,.3, # cover range of Xobs
+                            C_true-.05,C_true+.05, # cover C_true
+                            g_true-2,g_true+2),nrow=pX+pT,ncol=2,byrow = T)) # cover g_true
+Xsim=as.matrix(XTsim[,1])
+Tsim=as.matrix(XTsim[,2:3])
+YindSim = as.matrix(seq(1.5,24,1.5))
+Ysim = matrix(nrow=length(YindSim),ncol=m)
+for(i in 1:m){
+  Ysim[,i] = t_at_h_sim(C=Tsim[i,1],h=YindSim,R=Xsim[i],g=Tsim[i,2])
+}
+# obs data
+Xobs = as.matrix(rep(seq(.05,.25,length.out=n),reps))
+YindObs = as.matrix(c(5,10,15,20))
+Yobs = matrix(nrow=length(YindObs),ncol=n*reps)
+Ytrue = matrix(nrow=length(YindObs),ncol=n*reps)
+
+k = 0
+for(i in 1:n){
+  for(j in 1:reps){
+    k = k+1
+    Ytrue[,k] = t_at_h(C=C_true,h=YindObs,R=Xobs[k],g=g_true)
+    Yobs[,k] = Ytrue[,k] + rnorm(nrow(Yobs),0,sd_true)
+  }
+}
+
+matplot(YindSim,Ysim,type='l',col='orange',xlab='distance (m)',ylab='time (s)')
+matplot(YindObs,Yobs,pch=1,add=T,col='black')
+matplot(YindObs,Yobs,type='l',lty=1,add=T,col='black')
+legend('topleft',inset=c(.05,.05),legend=c('simulations','field observations'),lty=1,col=c('orange','black'))
+```
+
+Lets visualize the discrepancy by comparing simulation data and observed data at the same inputs. Observed data is shown as solid lines and simulation data as dashed lines, colors correspond to the 5 different input settings.
+
+```{r, echo=F}
+simAtObs = Yobs
+for(i in 1:n){
+  simAtObs[,i] = t_at_h_sim(C_true,h=YindObs,R=Xobs[i],g=g_true)
+}
+
+matplot(YindObs,simAtObs,type='l',xlab='distance (m)',ylab='time (s)',ylim=c(0,20),lty=2)
+matplot(YindObs,Yobs,pch=1,add=T)
+matplot(YindObs,Yobs,type='l',lty=1,add=T)
+legend('topleft',inset=c(.05,.05),legend=c('simulations','field observations'),lty=1,col=c('orange','black'))
+```
+
+Just like in the unbiased case we begin by first pre-scaling the inputs to the unit hypercube, and standardizing the outputs to mean zero and unit variance. We then generate basis representations of our outputs, and strech and compress inputs based on length-scale estimates from a full GP on a subset of the simulations.
+
+```{r precomputing}
+# step 0: Pre-scale data
+XTdata = transform_xt(Xsim,Tsim,Xobs)
+Ydata = transform_y(Ysim,YindSim,Yobs,YindObs,center = T,scale = T)
+
+# step 1: get basis
+simBasis = get_basis(Ydata$sim$trans,nPC)
+obsBasis = get_obs_basis(simBasis,Ydata$obs$trans,YindSim,YindObs,sigY=ifelse(sd_true>0,sd_true^2,1))
+
+# step 2: get length-scale estimates and stretch + compress input space
+estLS = mv_lengthscales(XTdata,simBasis$Vt,g=1e-7)
+SCinputs = get_SC_inputs(estLS,XTdata,nPC)
+```
+
+```{r, echo=F}
+obs_ids = mclapply(1:n, function(i) seq(i,dim(Ydata$obs$orig)[2],n))
+obs_means = mclapply(1:n, function(i) apply(Ydata$obs$orig[,obs_ids[[i]],drop=F],1,mean))
+BtBinv = solve(t(obsBasis$B)%*%obsBasis$B + diag(1e-8,nPC))
+```
+
+Calibration proceeds as described in the document laGP_calibration.pdf. The calibration likelihood has some interesting gradients which may be due to different number of PC's being chosen for the discrepancy basis.
+
+```{r calib, echo=F}
+ux = seq(.01,.99,length.out=as.integer(sqrt(nT)))
+tCalib = expand.grid(ux,ux)
+
+calib.bias = mv.calib.bias(tCalib,SCinputs,estLS,Ydata,simBasis$Vt,obsBasis,thetaHat=T)
+  
+ggplot(calib.bias$ll_df, aes(x = theta1, y = theta2, col = ll)) +
+  geom_point(size = 3) + 
+  geom_point(aes(x=as.numeric(calib.bias$theta.hat.orig[1]),y=as.numeric(calib.bias$theta.hat.orig[2])),col='red',size=1) +
+  scale_color_viridis_c()
+```
+
+We can see that our estimate of the error variance from the discrepancy GP is too small indicating that the discrepancy GP is over-fitting.
+
+```{r error variance, echo=F}
+cat('Error Variance Estimation\ntrue sd:',sd_true,'\nest sd :',round(sqrt(calib.bias$dfit$ssq.hat.native),4))
+```
+
+Unsurprisingly we get good prediction for the data points used to train the discrepancy model.
+
+```{r prediction, echo=F}
+Ypred = yPred.bias(calib.bias$theta.hat.orig,Xobs[1:n,,drop=F],estLS,XTdata,simBasis$Vt,calib.bias$dfit,obsBasis$B,1000)
+for(i in 1:n){
+  matplot(YindObs[,1],Ydata$obs$orig[,i,drop=F],pch=1,col=i+1,add=ifelse(i==1,F,T),ylim=c(0,15),
+          xlab='height',ylab='time',main='')
+  points(YindObs[,1],Ytrue[,i],col='black')
+  lines(YindObs[,1],Ypred$YMean[,i],col=i+1)
+  lines(YindObs[,1],Ypred$YInt[[i]][,1],type='l',col=i+1,lty=2)
+  lines(YindObs[,1],Ypred$YInt[[i]][,2],type='l',col=i+1,lty=2)
+}
+legend('topleft',inset=c(.05,.05),legend=paste0('Mean Pred Variance: ',round(mean(sqrt(Ypred$YVar)),3)))
+```
+
+# Prediction at new location
+
+The out-of-sample data we would like to predict is shown in green on the plot below and is firmly within the range of both observations and simulations.
+
+Prediction is much worse this new location, with our 95\% prediction interval missing the data at all points. This may the the best we can hope for using a flexible discrepancy model like a GP trained on 5 data points.
+
+```{r new Y prediction, echo=F}
+XobsNew = as.matrix(.075)
+YobsNew = matrix(nrow=length(YindObs),ncol=nrow(XobsNew))
+for(j in 1:nrow(XobsNew)){
+  YobsNew[,j] = t_at_h(C=C_true,h=YindObs,R=XobsNew[j],g=g_true) + rnorm(nrow(YobsNew),0,sd_true)
+}
+
+matplot(YindSim,Ysim,col='orange',type='l',lty=2)
+matplot(YindObs,Yobs,col='black',type='b',lty=1,pch=1,add=T)
+matplot(YindObs,YobsNew,col='green',type='b',lty=1,pch=1,add=T)
+
+XTdataNew = transform_xt(Xsim,Tsim,XobsNew)
+YdataNew = transform_y(Ysim,YindSim,YobsNew,YindObs,center = T,scale = T)
+obsBasisNew = get_obs_basis(simBasis,YdataNew$obs$trans,YindSim,YindObs,sigY=ifelse(sd_true>0,sd_true^2,1))
+BtBinvNew = solve(t(obsBasisNew$B)%*%obsBasisNew$B + diag(1e-8,nPC))
+
+SCinputsNew = get_SC_inputs(estLS,XTdataNew,nPC)
+
+YpredNew = yPred.bias(calib.bias$theta.hat.orig,XobsNew,estLS,XTdataNew,simBasis$Vt,calib.bias$dfit,obsBasisNew$B,1000)
+
+matplot(YindObs,YdataNew$obs$orig,pch=1,col='black',
+        xlab='height',ylab='time',main='',ylim=c(0,15))
+#points(YindObs[,1],Ytrue[,i],col='black')
+lines(YindObs[,1],YpredNew$YMean,col='green')
+lines(YindObs[,1],YpredNew$YInt[[1]][,1],type='l',col='green',lty=2)
+lines(YindObs[,1],YpredNew$YInt[[1]][,2],type='l',col='green',lty=2)
+legend('topleft',inset=c(.05,.05),legend=paste0('Mean Pred SD: ',round(mean(sqrt(YpredNew$YVar)),4)))
+```

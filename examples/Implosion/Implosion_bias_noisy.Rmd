@@ -29,7 +29,7 @@ plot_surf = function(Z,times,angles,shade=0,zlim=c(0,1),add=F,col='white',alpha=
 }
 ```
 
-Now we add a periodic angle bias to the experimental data. In this first plot we show the new experimental data without noise, then in the next plot we show the noisy versions. We can see that the angle bias should not be too hard to model, as its a simple periodic function. We will add slightly less noise with $\sigma_y=.05$.
+In addition to the angle bias we added in Implosion_bias.Rmd, we will not add some noise to the observed data. In the first plot we show the experimental data without noise, then in the next plot we show the noisy versions. In Implosion_bias.Rmd we saw that the periodic angle bias was fairly easy to model, but here, visualy, we can hardly see the difference between noise and angle bias even with a small mount of noise ($\sigma_y=.05$).
 
 ```{r, echo=FALSE}
 m = 36
@@ -103,20 +103,21 @@ plot_surf(YobsNew,time_obs[[i]],phi_obs,shade=.01,zlim=c(1,3.5),alpha=.5,col='bl
 par(mfrow=c(1,1))
 ```
 
-```{r, echo=FALSE}
+```{r}
 XTdata = transform_xt(Xsim,Tsim,Xobs,Tobs)
-Ydata = transform_y(Ysim,YindSim,Yobs,YindObs,center = T,scale = T, scaletype='scalar')
-obs_ids = mclapply(1:n, function(i) seq(i,dim(Ydata$obs$orig)[2],n))
+Ydata = transform_y(Ysim,YindSim,Yobs,YindObs,center = T,scale = T)
 
 simBasis = get_basis(Ydata$sim$trans,nPC)
-
 obsBasis = get_obs_basis(simBasis,Ydata$obs$trans,YindSim,YindObs,sigY=ifelse(sd_true>0,sd_true^2,1))
-BtBinv = solve(t(obsBasis$B)%*%obsBasis$B + diag(1e-10,nPC))
-# testthat::expect_equal(obsBasis$B%*%obsBasis$Vt,Ydata$obs$trans,check.attributes = FALSE)
 
 estLS = mv_lengthscales(XTdata,simBasis$Vt,g=1e-7)
-# stretch and compress inputs
 SCinputs = get_SC_inputs(estLS,XTdata,nPC)
+```
+
+```{r, echo=F}
+obs_ids = mclapply(1:n, function(i) seq(i,dim(Ydata$obs$orig)[2],n))
+BtBinv = solve(t(obsBasis$B)%*%obsBasis$B + diag(1e-10,nPC))
+# testthat::expect_equal(obsBasis$B%*%obsBasis$Vt,Ydata$obs$trans,check.attributes = FALSE)
 ```
 
 ```{r, echo=FALSE}
@@ -133,10 +134,10 @@ calib.bias = mv.calib.bias(tCalib,
 ggplot(calib.bias$ll_df, aes(x = theta1, y = theta2, col = ll)) +
   geom_point(size = 3) +
   scale_color_viridis_c() + geom_point(aes(x=calib.bias$theta.hat[1],y=calib.bias$theta.hat[2]),col='red',size=1) +
-  geom_point(aes(x=.5,y=.5),col='black',size=1) + ggtitle('disc in Y\'s')
+  geom_point(aes(x=.5,y=.5),col='black',size=1) + ggtitle('Calibration likelihood')
 ```
 
-Predictions 1-3 show clear evidence of the discrepancy GP over-fitting. This is a problem when we move to out of sample prediction as we can see in the lower right plot. This would get better with more data, but we probably need a less flexible discrepancy model. We also see that estimated error variance is too small.
+Predictions 1-3 show clear evidence of the discrepancy GP over-fitting, capturing too much noise with the angle effect. This is a problem when we move to out of sample prediction as we can see in the lower right plot. This would get better with more data, but we probably need a less flexible discrepancy model. We also see that estimated error variance is too small.
 
 ```{r error variance, echo=F}
 cat('Error Variance Estimation\ntrue sd:',sd_true,'\nest sd :',round(sqrt(calib.bias$dfit$ssq.hat.native),4))

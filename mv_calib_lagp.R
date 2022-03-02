@@ -5,15 +5,29 @@ library(tgp)
 library(parallel)
 library(pracma)
 
+# FUNCTION: ll_beta: log likelihood of beta(a,b) evaluated at x. Used as a prior on calibration parameters
 ll_beta = function(x,a,b){
   (a-1)*log(x) + (b-1)*log(1-x) -lbeta(a,b)
 }
-# FUNCTION: multivariate aGPsep for use with stretched and compressed inputs only
-## Parameters:
-# X : list of length nPC which contains stretched and compressed training input matrices
-# Z : list of length nPC which contains training response vectors
-# XX: list of length nPC with contains stretched and compressed prediction input matrices
 
+plot_wz_pairs = function(w,z,legend=T){
+  nPC = nrow(w)
+  m = ncol(w)
+  n = ncol(z)
+  if(nPC>1){
+    pairs(rbind(t(w),t(z)),col=c(rep('blue',m),rep('orange',n)),pch=1,labels=paste0('PC',1:nPC),
+          oma=c(3,3,3,15))
+    if(legend){
+      par(xpd = TRUE)
+      legend("bottomright", pch=1, col=c('blue','orange'), legend=c('w','z'))
+    }
+  } else{
+    hist(t(w),col='blue');abline(v=t(z),col='orange')
+    if(legend){
+      legend("topright", pch=1, col=c('blue','orange'), legend=c('w','z'))
+    }
+  }
+}
 w_to_y = function(w,B,mean=NULL,sd=NULL){
   Y = B%*%w
   if(!is.null(sd)){
@@ -35,23 +49,94 @@ mv.em.pred = function(theta,Xpred,estLS,XTdata,simVt){
                        returnYmean = F)
   return(list(GPs=emGPs,XpredSC=XpredSC))
 }
-yPred.nobias= function(wMean,wVar,ssq.hat,B,BtBinv,nsamples,yMean,ySD){
-  n = ncol(wMean)
-  YSamp = array(dim=c(nrow(YindObs),nsamples,n))
-  for(j in 1:n){
-    vSamp = t(mvtnorm::rmvnorm(nsamples,mean=wMean[,j],
-                                       sigma = ssq.hat*BtBinv + diag(wVar[,j])))
-    YSamp[,,j] = w_to_y(vSamp,B,yMean,ySD)
+yPred.nobias= function(emGPs,ssq.hat,B,BtBinv,nsamples,Yobs,ysamp=T){
+  n = ncol(Yobs$orig)
+  nY = nrow(Yobs$orig)
+  YSamp = array(dim=c(nY,nsamples,n))
+  if(ysamp){
+    for(i in 1:n){
+      YSamp[,,i] = t(mvtnorm::rmvnorm(nsamples,mean=B%*%emGPs$wMean[,i,drop=F],
+                                      sigma = ssq.hat*eye(nY) + B%*%diag(emGPs$wVar[,i])%*%t(B))) * Yobs$sd + Yobs$mean
+    }
+  } else{
+    for(i in 1:n){
+      vSamp = t(mvtnorm::rmvnorm(nsamples,mean=emGPs$wMean[,i],
+                                 sigma = ssq.hat*BtBinv + diag(emGPs$wVar[,i])))
+      YSamp[,,i] = w_to_y(vSamp,B,Yobs$mean,Yobs$sd)
+    }
   }
   YMean = apply(YSamp,c(1,3),mean)
   YVar = apply(YSamp,c(1,3),var)
   YInt = mclapply(1:n,function(i) t(apply(YSamp[,,i],1,quantile,c(.025,.975))))
-  return(list(vSamp=vSamp,YSamp=YSamp,YMean=YMean,YVar=YVar,YInt=YInt))
+  #return(list(vSamp=vSamp,YSamp=YSamp,YMean=YMean,YVar=YVar,YInt=YInt))
+  return(list(YSamp=YSamp,YMean=YMean,YVar=YVar,YInt=YInt))
 }
 
+yPred.bias = function(theta,Xpred,estLS,XTdata,simVt,
+                      dfit,Bobs,nsamples=1){
+  nY = nrow(Bobs)
+  n = nrow(Xpred)
+  emSamp = array(dim=c(nY,nsamples,n))
+  discSamp = array(dim=c(nY,nsamples,n))
+  #YSamp = array(dim=c(nY,nsamples,n))
+  emulator = mv.em.pred(theta,Xpred,estLS,XTdata,simVt)
+  discrep = lapply(1:dfit$disc$basis$nPC, function(i) predGPsep(dfit$disc$GPs[[i]],Xpred))
+  # make wMean and wVar for discrep
+  wMean = NULL; wVar = NULL
+  for(i in 1:dfit$disc$basis$nPC){
+    wMean = rbind(wMean,discrep[[i]]$mean)
+    wVar = rbind(wVar,diag(discrep[[i]]$Sigma))
+  }
+  
+  for(j in 1:n){
+    emSamp[,,j] = t(mvtnorm::rmvnorm(nsamples,mean=Bobs%*%emulator$GPs$wMean[,j,drop=F],
+                                     sigma = Bobs%*%diag(emulator$GPs$wVar[,j])%*%t(Bobs))) *
+                  Ydata$obs$sd + Ydata$obs$mean 
+    discSamp[,,j] = t(mvtnorm::rmvnorm(nsamples,mean=dfit$disc$basis$B%*%wMean[,j,drop=F],
+                                       sigma = dfit$disc$basis$B%*%diag(wVar[,j],nrow=length(wVar[,j]))%*%t(dfit$disc$basis$B) *
+                                         dfit$ssq.hat*eye(nY) )) * Ydata$obs$sd
+  }
+  YSamp = emSamp + discSamp
+  
+  YMean = apply(YSamp,c(1,3),mean)
+  YVar = apply(YSamp,c(1,3),var)
+  YInt = mclapply(1:n,function(i) t(apply(YSamp[,,i],1,quantile,c(.025,.975))))
+  emMean = apply(emSamp,c(1,3),mean)
+  discMean = apply(discSamp,c(1,3),mean)
+  return(list(YSamp=YSamp,YMean=YMean,YVar=YVar,YInt=YInt,
+              emMean = emMean, discMean=discMean))
+}
+
+# FUNCTION: multivariate aGPsep for use with stretched and compressed inputs only
+{## Parameters:
+# required
+# X : list of length nPC which contains stretched and compressed training input matrices
+# Z : list of length nPC which contains training response vectors
+# XX: list of length nPC with contains stretched and compressed prediction input matrices
+# optional
+# start: integer, initial size of laPG neighborhood
+# end: integer, final size of laGP neighborhood
+# g: double, laGP nugget
+# returnYmean: bool, return GP mean on Y scale
+# yMean: vector, mean of original y's, if nothing is passed yMean is returned unshifted
+# ySD: vector, sd of original y's, if nothing is passed yMean is returned unscaled
+# Bobs: matrix of basis vectors for transforming predicted basis weights to y scale
+## Returns:
+# lagp_fit: list of nPC outputs from aGPsep
+# wMean: matrix (nPC x n) of prediction means
+# wVar: matrix (nPC x n) of prediction variances
+# yMean: matrix (nY x n) of prediction means on y scale (Bobs %*% wMean)
+## Calls:
+# aGPsep from laGP package
+# w_to_y to transform w -> y
+## Called by:
+# mv.calib.bias: biased calibration
+# mv.calib.nobias: unbiased calibration
+# mv.em.pred: laGP emulator prediction function at new inputs
+}
 aGPsep_SC_mv = function(X, Z, XX,
                         start=6, end=50, 
-                        g=1/10000, method="nn",
+                        g=1/10000,
                         returnYmean=T, yMean = NULL, ySD = NULL, Bobs=NULL){
   nPC = length(Z)
   nY = nrow(XX[[1]])
@@ -67,7 +152,7 @@ aGPsep_SC_mv = function(X, Z, XX,
                            g = g,
                            start = start,
                            end = min(end,length(Z[[i]])-1),
-                           method = method,
+                           method = 'nn',
                            verb=0)
     wMean[i,] = lagp_fit[[i]]$mean
     wVar[i,] = lagp_fit[[i]]$var
@@ -83,7 +168,7 @@ aGPsep_SC_mv = function(X, Z, XX,
 }
 
 # FUNCTION: get_basis
-### Accepts a matrix of response values Y, and returns the basis decomposition from SVD
+{### Accepts a matrix of response values Y, and returns the basis decomposition from SVD
 ## Parameters:
 # Y (numeric)       : matrix of response values to decompose into basis representation. Y should be
 #                     formatted such that each row represents the multivariate response for a single experiment
@@ -93,6 +178,11 @@ aGPsep_SC_mv = function(X, Z, XX,
 # B (numeric)       : matrix of nPC basis vectors for Ytrans
 # Vt (numeric)      : matrix of nPC response vectors for Ytrans
 # nPC (integer)    : number of PC's used for the basis decomposition
+## Calls:
+## Called by:
+# user when generating sim basis
+# mv.calib.bias for generating discrepancy basis
+}
 get_basis = function(Y, nPC = 1, pctVar = NULL){
 
   retList = list()
@@ -116,21 +206,37 @@ get_basis = function(Y, nPC = 1, pctVar = NULL){
   
   return(retList)
 }
+
+# FUNCTION: get_obs_basis
+{### Generated obs basis vectors by interpolating sim basis vectors
+## Parameters:
+# simBasis       : output from get_basis
+# Yobs        : matrix (nY x n) field data
+# YindSim : matrix of field data indices of observation
+## Returns: List containings the following
+# B (numeric)       : matrix of nPC basis vectors
+# Vt (numeric)      : matrix of nPC response vectors
+# nPC (integer)    : number of PC's used for the basis decomposition
+## Calls:
+## Called by:
+# user when generating obs basis
+}
 get_obs_basis = function(simBasis,Yobs,YindSim,YindObs,sigY=NULL){
   obsBasis = list()
-  obsBasis$nPC = simBasis$nPC
+  nPC = simBasis$nPC
+  obsBasis$nPC = nPC
   if(!isTRUE(all.equal(YindObs,YindSim))){
-    B = matrix(nrow=nrow(YindObs),ncol=nPC)
+    B = matrix(nrow=nrow(YindObs),ncol=obsBasis$nPC)
     if(ncol(YindSim)==1){
       # 1d interpolation
-      for(i in 1:simBasis$nPC){
-        B[,i] = interp1(as.numeric(YindSim),as.numeric(simBasis$B[,i]),as.numeric(YindObs))
+      for(j in 1:nPC){
+        B[,j] = interp1(as.numeric(YindSim),as.numeric(simBasis$B[,j]),as.numeric(YindObs))
       }
     } else if(ncol(YindSim)==2){
       # 2d interpolation
       y = unique(YindSim[,1]); x = unique(YindSim[,2])
       yp = YindObs[,1]; xp = YindObs[,2]
-      for(i in 1:simBasis$nPC){
+      for(i in 1:nPC){
         B[,i] = interp2(x,y,matrix(simBasis$B[,i],length(y),length(x),byrow = F),xp,yp)
       }
     }
@@ -155,6 +261,7 @@ get_obs_basis = function(simBasis,Yobs,YindSim,YindObs,sigY=NULL){
 }
 
 # FUNCTION: mv_lengthscales
+# TO DO: this function needs to be updated for only using a subset of the data
 ### Computes estimated length scale parameters for use in stretching and compressing the inputs space
 # Parameters:
 # X (numeric) : untransformed matrix of inputs
@@ -222,7 +329,7 @@ unit_xform = function(X,Xmin=NULL,Xrange=NULL){
               range=Xrange))
 }
 
-transform_y = function(Ysim,YindSim,Yobs=NULL,YindObs=NULL,center=T,scale=T, scaletype='scalar'){
+transform_y = function(Ysim,YindSim,Yobs=NULL,YindObs=NULL,center=T,scale=T, scaletype='columnwise'){
   simList = list()
   obsList = list()
   dim = ncol(YindSim)
@@ -237,6 +344,8 @@ transform_y = function(Ysim,YindSim,Yobs=NULL,YindObs=NULL,center=T,scale=T, sca
   if(scale){
     if(scaletype=='columnwise'){
       simList$sd = apply(Ysim,1,sd)
+      # dont scale places with var 0
+      simList$sd[simList$sd==0]=1
     } else if(scaletype=='scalar') {
       sd = sd(Ysim)
       simList$sd = rep(sd,nrow(Ysim))
@@ -355,15 +464,21 @@ sc_inputs = function(X,ls){
   return(sweep(X, 2, sqrt(ls), FUN = '/'))
 }
 
-mv.calib.nobias = function(thetaCalib,SCinputs,estLS,Ydata,simVt,obsBasis,BtBinv,clean=T,obsReps=1){
+mv.calib.nobias = function(tCalib,SCinputs,estLS,Ydata,simVt,obsBasis,BtBinv,thetaHat=F){
   nPC = obsBasis$nPC
   n = ncol(Ydata$obs$orig)
-
+  tCalibOrig = t(t(tCalib) * XTdata$sim$T$range + XTdata$sim$T$min)
+  
   get_ll_ssq = function(theta){
     # transform theta by estimated length-scales
     thetaSC = mclapply(1:nPC, function(j) sc_inputs(theta,estLS$T[[j]]))
     # make prediction matrix from Xobs and theta
-    Xpred = lapply(1:nPC, function(j) cbind(SCinputs$Xobs[[j]],t(replicate(n,thetaSC[[j]],simplify='matrix'))))
+    if(SCinputs$pT>1){
+      Xpred = lapply(1:nPC, function(j) cbind(SCinputs$Xobs[[j]],t(replicate(n,thetaSC[[j]],simplify='matrix'))))
+    } else{
+      Xpred = lapply(1:nPC, function(j) cbind(SCinputs$Xobs[[j]],t(t(replicate(n,thetaSC[[j]],simplify='matrix')))))
+    }
+    
     
     # Predict from emulator at [Xobs,theta]
     emGPs = aGPsep_SC_mv(X=SCinputs$XTsim,
@@ -383,154 +498,167 @@ mv.calib.nobias = function(thetaCalib,SCinputs,estLS,Ydata,simVt,obsBasis,BtBinv
     for(i in 1:n){
       ll[i] = mvtnorm::dmvnorm(x=wDisc[,i],sigma=ssq.hat*BtBinv+diag(emGPs$wVar[,i]),log=T)
     }
-    ll = sum(ll) + n*sum(ll_beta(theta,2,2))
+    ll = sum(ll) #+ n*sum(ll_beta(theta,2,2))
     # return vector with first element likelihood and second element error variance estimate
     return(c(ll,ssq.hat,ssq.hat.native))
   }
-  ll_df = matrix(nrow=nrow(thetaCalib),ncol=3+SCinputs$pT)
-  ll_df = data.frame(cbind(matrix(unlist(mclapply(1:nrow(thetaCalib), function(i) get_ll_ssq(thetaCalib[i,]))),ncol=3,byrow = T),thetaCalib))
-  colnames(ll_df) = c('ll','ssq.std','ssq.native',paste0("theta",1:pT))
-  return(ll_df)
+  ll_df = matrix(nrow=nrow(tCalib),ncol=3+SCinputs$pT)
+  ll_df = data.frame(cbind(matrix(unlist(mclapply(1:nrow(tCalib), function(i) get_ll_ssq(tCalib[i,,drop=F]))),ncol=3,byrow = T),tCalib))
+  colnames(ll_df) = c('ll','ssq.std','ssq.native',paste0("theta",1:SCinputs$pT))
+  if(thetaHat){
+    theta.hat.id = which.max(ll_df$ll)
+    theta.hat = as.matrix(tCalib[theta.hat.id,,drop=F],nrow=1)
+    theta.hat.orig = as.matrix(tCalibOrig[theta.hat.id,,drop=F],nrow=1)
+    ssq.hat = ll_df$ssq.std[theta.hat.id]
+    ssq.hat.orig = ll_df$ssq.native[theta.hat.id]
+    return(list(ll_df=ll_df,theta.hat=theta.hat,theta.hat.orig=theta.hat.orig,
+                ssq.hat=ssq.hat,ssq.hat.orig=ssq.hat.orig))
+  } else{
+    return(ll_df)
+  }
 }
 
-mv.calib.biasDtD = function(thetaCalib,SCinputs,estLS,Ydata,simVt,obsBasis,BtBinv,clean=T){
-  nPC = simBasis$nPC
+mv.calib.nobias_yllh = function(tCalib,SCinputs,estLS,Ydata,simVt,obsBasis,thetaHat=F){
+  nPC = obsBasis$nPC
   n = ncol(Ydata$obs$orig)
+  nY = nrow(Ydata$obs$orig)
+  tCalibOrig = t(t(tCalib) * XTdata$sim$T$range + XTdata$sim$T$min)
   
-  get_disc = function(theta){
-    thetaSC = lapply(1:nPC, function(j) sc_inputs(theta,estLS$T[[j]]))
-    Xpred = lapply(1:nPC, function(j) cbind(SCinputs$Xobs[[j]],t(replicate(n*obsReps,thetaSC[[j]],simplify='matrix')))[1:n,])
+  get_ll_ssq = function(theta){
+    # transform theta by estimated length-scales
+    thetaSC = mclapply(1:nPC, function(j) sc_inputs(theta,estLS$T[[j]]))
+    # make prediction matrix from Xobs and theta
+    Xpred = lapply(1:nPC, function(j) cbind(SCinputs$Xobs[[j]],t(replicate(n,thetaSC[[j]],simplify='matrix'))))
+    
+    # Predict from emulator at [Xobs,theta]
     emGPs = aGPsep_SC_mv(X=SCinputs$XTsim,
-                         Z=lapply(1:nPC,function(j) simVt[j,]), XX=Xpred,
+                         Z=lapply(1:nPC,function(j) simVt[j,]),
+                         XX=Xpred,
                          Bobs = obsBasis$B)
     
-    Wdisc = obsBasis$Vt - do.call(cbind, replicate(obsReps, emGPs$wMean, simplify=FALSE))
-    Ydisc = Ydata$obs$trans - do.call(cbind, replicate(obsReps, emGPs$yMean, simplify=FALSE))
-    ssq.hat = mean(Ydisc^2)
-    return(list(emGPs=emGPs,Wdisc=Wdisc,Ydisc=Ydisc,ssq.hat=ssq.hat))
-  }
-  fit_disc = function(theta,bias,clean){
-    discGPs = NULL
-    # discBasis = get_basis(bias$Ydisc,nPC)
-    discBasis = get_obs_basis(simBasis,bias$Ydisc,YindSim,YindObs)
-    DtDinv = solve(t(discBasis$B)%*%discBasis$B)
-    
-    wMean = NULL; wSigma = NULL
-    ll = numeric(nPC)
-    for(k in 1:nPC){
-      d = darg(d=NULL,X=SCinputs$Xobs[[k]])
-      g = garg(g=NULL,y=discBasis$Vt[k,])
-      # Our responses have changed wrt to inputs, so we should not use d=1 anymore
-      discGPs$GPs[[k]] <- newGPsep(X=SCinputs$Xobs[[k]],
-                                   Z=discBasis$Vt[k,],
-                                   d=d$start, g=g$start, dK=TRUE)
-      cmle <- jmleGPsep(discGPs$GPs[[k]],
-                        drange=c(d$min, d$max),
-                        grange=c(g$min, g$max),
-                        dab=d$ab,
-                        gab=g$ab)
-      ll[k] = llikGPsep(discGPs$GPs[[k]])
-      pred = predGPsep(discGPs$GPs[[k]], XX = SCinputs$Xobs[[k]])
-      wMean = rbind(wMean, pred$mean)
-      wSigma[[k]] = pred$Sigma
-      if(clean){
-        deleteGPsep(discGPs$GPs[[k]])
-      }
+    # residuals
+    wDisc = obsBasis$Vt - emGPs$wMean
+    yDisc = Ydata$obs$trans - w_to_y(emGPs$wMean,obsBasis$B)
+    yDiscNative = Ydata$obs$orig - w_to_y(emGPs$wMean,obsBasis$B,mean=Ydata$obs$mean,sd=Ydata$obs$sd)
+    # error variance estimate
+    ssq.hat = mean(yDisc^2)
+    ssq.hat.native = mean(yDiscNative^2)
+    #ssq.hat = apply(yDisc^2,2,mean)
+    #ssq.hat.native = apply(yDiscNative^2,2,mean)
+    # likelihood
+    ll = numeric(n)
+    for(i in 1:n){
+      ll[i] = mvtnorm::dmvnorm(x=yDisc[,i],sigma=ssq.hat*eye(nY) + obsBasis$B%*%diag(emGPs$wVar[,i])%*%t(obsBasis$B),log=T)
+      #ll[i] = mvtnorm::dmvnorm(x=yDisc[,i],sigma=ssq.hat[i]*eye(nY) + obsBasis$B%*%diag(emGPs$wVar[,i])%*%t(obsBasis$B),log=T)
+      
     }
-    # # new residuals
-    # wDisc = bias$Wdisc - wMean
-    # # calculate log likelihood
-    # llh = numeric(n)
-    # for(i in 1:n){
-    #   llh[i] = mvtnorm::dmvnorm(x=wDisc[,i],sigma=bias$ssq.hat*BtBinv+diag(bias$emGPs$wVar[,i]+diag(wVar[,i])),log=T)
-    # }
-    return(sum(ll) + nPC*sum(ll_beta(theta,2,2)))
+    ll = sum(ll) #+ n*sum(ll_beta(theta,2,2))
+    # return vector with first element likelihood and second element error variance estimate
+    return(c(ll,mean(ssq.hat),mean(ssq.hat.native)))
   }
-  
-  ll = numeric(nrow(thetaCalib))
-  for(i in 1:length(ll)){
-    bias = get_disc(thetaCalib[i,])
-    ll[i] = fit_disc(thetaCalib[i,],bias,clean=T)
+  ll_df = matrix(nrow=nrow(tCalib),ncol=3+SCinputs$pT)
+  ll_df = data.frame(cbind(matrix(unlist(mclapply(1:nrow(tCalib), function(i) get_ll_ssq(tCalib[i,]))),ncol=3,byrow = T),tCalib))
+  colnames(ll_df) = c('ll','ssq.std','ssq.native',paste0("theta",1:pT))
+  if(thetaHat){
+    theta.hat.id = which.max(ll_df$ll)
+    theta.hat = as.matrix(tCalib[theta.hat.id,,drop=F],nrow=1)
+    theta.hat.orig = as.matrix(tCalibOrig[theta.hat.id,,drop=F],nrow=1)
+    ssq.hat = ll_df$ssq.std[theta.hat.id]
+    ssq.hat.orig = ll_df$ssq.native[theta.hat.id]
+    return(list(ll_df=ll_df,theta.hat=theta.hat,theta.hat.orig=theta.hat.orig,
+                ssq.hat=ssq.hat,ssq.hat.orig=ssq.hat.orig))
+  } else{
+    return(ll_df)
   }
-  
-  ll_df = as.data.frame(matrix(cbind(ll,tCalibOrig,as.matrix(thetaCalib),ssq.hat),nrow=length(ll),ncol=2*pT+2))
-  names = c("ll")
-  names = c(names,paste0("theta",1:pT),paste0("thetaScaled",1:pT),'ssq')
-  colnames(ll_df) = names
-  return(ll_df)
 }
-mv.calib.bias = function(thetaCalib,SCinputs,estLS,Ydata,simVt,obsBasis,BtBinv,clean=T){
+
+mv.calib.bias = function(tCalib,SCinputs,estLS,Ydata,simVt,obsBasis,thetaHat=F){
   discBasis=NULL; emGPs=NULL; w = NULL; discGPs = NULL
-  set.seed(seed)
   pT = XTdata$pT
   pX = XTdata$pX
   nPC = simBasis$nPC
-  n = ncol(Ydata$obs$orig)/obsReps
-
-  #tCalibOrig = t(t(thetaCalib) * XTdata$sim$T$range + XTdata$sim$T$min)
-
-  covMat = mclapply(1:nPC, function(k) exp(-0.5 * fields::rdist(SCinputs$Xobs[[k]])^2) + diag(1e-8, nrow(SCinputs$Xobs[[k]])))
-  S = as.matrix(Matrix::bdiag(covMat))
-  Sinv = chol2inv(chol(S))
-  ldetS = determinant(S)$modulus
-
-  # covMat = rep(list(BtBinv),n*obsReps)
-  # covMat = as.matrix(Matrix::bdiag(covMat))
-  # ldetB = n*obsReps*determinant(BtBinv)$modulus
+  n = ncol(Ydata$obs$orig)
+  tCalibOrig = t(t(tCalib) * XTdata$sim$T$range + XTdata$sim$T$min)
 
   get_disc = function(theta){
     thetaSC = lapply(1:nPC, function(j) sc_inputs(theta,estLS$T[[j]]))
-    Xpred = lapply(1:nPC, function(j) cbind(SCinputs$Xobs[[j]],t(replicate(n*obsReps,thetaSC[[j]],simplify='matrix')))[1:n,])
+    Xpred = lapply(1:nPC, function(j) cbind(SCinputs$Xobs[[j]],t(replicate(n,thetaSC[[j]],simplify='matrix'))))
     emGPs = aGPsep_SC_mv(X=SCinputs$XTsim,
                          Z=lapply(1:nPC,function(j) simVt[j,]), XX=Xpred,
                          Bobs = obsBasis$B)
-
-    Wdisc = obsBasis$Vt - do.call(cbind, replicate(obsReps, emGPs$wMean, simplify=FALSE))
-    Ydisc = Ydata$obs$trans - do.call(cbind, replicate(obsReps, emGPs$yMean, simplify=FALSE))
-    ssq.hat = mean(Ydisc^2)
-    return(list(Wdisc=Wdisc,Ydisc=Ydisc,ssq.hat=ssq.hat))
+    
+    Wdisc = obsBasis$Vt - emGPs$wMean
+    Ydisc = Ydata$obs$trans - w_to_y(emGPs$wMean,obsBasis$B)
+    YdiscNative = Ydata$obs$orig - w_to_y(emGPs$wMean,obsBasis$B,Ydata$obs$mean,Ydata$obs$sd)
+    return(list(emGPs=emGPs,Wdisc=Wdisc,Ydisc=Ydisc,YdiscNative=YdiscNative))
   }
-  fit_disc = function(theta,Ydisc,clean){
-    discGPs = NULL
-    discBasis = get_basis(Ydisc,nPC)
-    wMean = NULL; wVar = NULL
-    for(k in 1:nPC){
-      d = darg(d=NULL,X=SCinputs$Xobs[[k]])
-      g = garg(g=NULL,y=discBasis$Vt[k,])
+  fit_disc = function(theta,bias,clean){
+    disc = NULL; disc$GPs = vector(mode='list',length=nPC)
+    disc$basis = get_basis(bias$Ydisc,pctVar = .95)
+    nY = nrow(bias$Ydisc)
+    
+    for(k in 1:disc$basis$nPC){
+      d = darg(d=NULL,X=Xobs)
+      g = garg(g=NULL,y=disc$basis$Vt[k,])
       # Our responses have changed wrt to inputs, so we should not use d=1 anymore
-      discGPs$GPs[[k]] <- newGPsep(X=SCinputs$Xobs[[k]],
-                                   Z=discBasis$Vt[k,],
-                                   d=d$start, g=g$start, dK=TRUE)
-      cmle <- jmleGPsep(discGPs$GPs[[k]],
+      disc$GPs[[k]] <- newGPsep(X=Xobs,
+                                Z=disc$basis$Vt[k,],
+                                d=d$start, g=g$start, dK=TRUE)
+      cmle <- jmleGPsep(disc$GPs[[k]],
                         drange=c(d$min, d$max),
                         grange=c(g$min, g$max),
                         dab=d$ab,
                         gab=g$ab)
-      pred = predGPsep(discGPs$GPs[[k]], XX = SCinputs$Xobs[[k]])
-      wMean = rbind(wMean, pred$mean)
-      wVar = rbind(wVar, pred$var)
-      }
+      pred = predGPsep(disc$GPs[[k]], XX = Xobs, lite=T)
+      disc$wMean = rbind(disc$wMean, pred$mean)
+      # disc$wSigma[[k]] = pred$Sigma
+      disc$wVar = rbind(disc$wVar, pred$s2)
       if(clean){
-        deleteGPsep(discGPs$GPs[[k]])
+        deleteGPsep(disc$GPs[[k]])
       }
-    wVec = as.numeric(t(wMean))
-    VtDiscVec <- as.numeric(t(discBasis$Vt))
-    # calculate log likelihood
-    diff = wVec - VtDiscVec
-    N = length(diff)
-    RSS = t(diff)%*%Sinv%*%diff
-    return(-.5*(N*log(.5*RSS) + ldetS) + sum(ll_beta(theta,2,2)))
+      # disc$GPs[[k]] = aGPsep(X=SCinputs$Xobs[[k]],
+      #                        Z=disc$basis$Vt[k,],
+      #                        XX=SCinputs$Xobs[[k]],
+      #                        start=1,
+      #                        end=min(50,length(disc$basis$Vt[k,])-1),
+      #                        d = d,
+      #                        g = list(start=g$start,mle=T),
+      #                        verb=0)
+      # disc$wMean = rbind(disc$wMean, disc$GPs[[k]]$mean)
+      # disc$wVar = rbind(disc$wVar, disc$GPs[[k]]$var)
+    }
+    # new residuals (Y-emulator) - discrepancy estimate, this is mean zero
+    newDisc = bias$Ydisc - w_to_y(disc$wMean,disc$basis$B)
+    ssq.hat = mean(newDisc^2)
+    newDiscNative = bias$YdiscNative - w_to_y(disc$wMean,disc$basis$B,sd=Ydata$obs$sd)
+    ssq.hat.native = mean(newDiscNative^2)
+    ll = 0
+    for(i in 1:n){
+      ll = ll + mvtnorm::dmvnorm(x=newDisc[,i],sigma=obsBasis$B%*%diag(bias$emGPs$wVar[,i])%*%t(obsBasis$B) +
+                                   disc$basis$B%*%diag(disc$wVar[,i],nrow=disc$basis$nPC)%*%t(disc$basis$B) + 
+                                   ssq.hat*eye(nY),log = T)
+    }
+    return(list(disc=disc,ll=ll,ssq.hat=ssq.hat,ssq.hat.native=ssq.hat.native))
   }
-
-  ll = numeric(nrow(thetaCalib))
+  
+  ll = numeric(nrow(tCalib))
   for(i in 1:length(ll)){
-    Ydisc = get_disc(thetaCalib[i,])$Ydisc
-    ll[i] = fit_disc(thetaCalib[i,],Ydisc,clean=T)
+    bias = get_disc(tCalib[i,,drop=F])
+    ll[i] = fit_disc(tCalib[i,,drop=F],bias,clean=T)$ll
   }
 
-  ll_df = as.data.frame(matrix(cbind(ll,tCalibOrig,as.matrix(thetaCalib),ssq.hat),nrow=length(ll),ncol=2*pT+2))
+  ll_df = as.data.frame(matrix(cbind(ll,tCalibOrig,as.matrix(tCalib)),nrow=length(ll),ncol=2*pT+1))
   names = c("ll")
-  names = c(names,paste0("theta",1:pT),paste0("thetaScaled",1:pT),'ssq')
+  names = c(names,paste0("theta",1:pT),paste0("thetaScaled",1:pT))
   colnames(ll_df) = names
-  return(ll_df)
+  
+  if(thetaHat){
+    theta.hat = as.matrix(tCalib[which.max(ll_df$ll),,drop=F],nrow=1)
+    theta.hat.orig = as.matrix(tCalibOrig[which.max(ll_df$ll),,drop=F],nrow=1)
+    bias = get_disc(theta.hat)
+    dfit = fit_disc(theta.hat,bias,clean=F)
+    return(list(ll_df=ll_df,theta.hat=theta.hat,theta.hat.orig=theta.hat.orig,bias=bias,dfit=dfit))
+  } else{
+    return(ll_df)
+  }
 }

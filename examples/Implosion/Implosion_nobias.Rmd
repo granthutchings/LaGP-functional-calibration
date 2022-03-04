@@ -14,6 +14,7 @@ In the Neddermeyer experiments, steel cylinders were imploded using high explosi
 ```{r depends, echo=F, include=F}
 library(reticulate)
 library(plot3D)
+library(crs)
 source_python('SepiaImplosionExperimentData.py')
 source('../../mv_calib_lagp.R')
 
@@ -22,11 +23,10 @@ plot_surf = function(Z,times,angles,shade=0,zlim=c(0,1),add=F,col='white',alpha=
   ntimes = length(times)
   nangles = length(angles)
   Z = matrix(Z,ntimes,nangles,byrow = T)
-  #par(new=add)
   persp3D(times,angles,Z,
           phi=phi,theta=theta,
           shade=shade,zlim=zlim,col=col,add=add,alpha=alpha,
-          ltheta = theta-90, lphi = phi-45,
+          ltheta = theta-120, lphi = phi-45,
           xlab='time',ylab='angle',zlab='radius',main=main)
 }
 ```
@@ -109,24 +109,34 @@ estLS = mv_lengthscales(XTdata,simBasis$Vt,g=1e-7)
 SCinputs = get_SC_inputs(estLS,XTdata,nPC)
 ```
 
+```{r}
+mvcData = list(XTdata=XTdata,
+               Ydata=Ydata,
+               simBasis=simBasis,
+               obsBasis=obsBasis,
+               estLS=estLS,
+               SCinputs=SCinputs)
+```
+
 We calibrate using the methods described in laGP_calibration.pdf. The ML estimate $t^*$ is close to the truth of $t^*=(.5,.5)$.
 
 ```{r, echo=FALSE}
-nT = 13^2
-ux = seq(.01,.99,length.out=as.integer(sqrt(nT)))
-tCalib = as.matrix(expand.grid(ux,ux))
-calib = mv.calib.nobias(tCalib,
-         SCinputs,
-         estLS,
-         Ydata,
-         simBasis$Vt,
-         obsBasis,
-         BtBinv,
-         thetaHat = T)
+nT = 50
+tInit = dopt.gp(nT, Xcand = lhs(nT*100, matrix(rep(c(0,1),SCinputs$pT),nrow=2,byrow=T)))$XX
+# mv.calib.nobias(tInit,
+#                         SCinputs,
+#                         estLS,
+#                         Ydata,
+#                         simBasis$Vt,
+#                         obsBasis,
+#                         BtBinv,
+#                         thetaHat=T)
+calib = mv.calib.snomadr(mvcData,tInit,1,F)
 ggplot(calib$ll_df, aes(x = theta1, y = theta2, col = ll)) +
-  geom_point(size = 3) +
-  scale_color_viridis_c() + geom_point(aes(x=calib$theta.hat[1],y=calib$theta.hat[2]),col='red',size=1) +
-  geom_point(aes(x=.5,y=.5),col='black',size=1) + ggtitle('Calibration likelihood')
+     geom_point(size = 3) +
+     scale_color_viridis_c() +
+     geom_point(aes(x=.5,y=.5),col='black',size=1) + ggtitle('')
+cat('t*:',calib$theta.hat)
 ```
 
 Our estimate of the error variance is quite good.
@@ -139,18 +149,24 @@ cat('True error variance     :',sd_true^2,
 In the plots below the noisy observed data is in orange. Predictive means are in black for the experiments used for calibration and blue for the holdout experiment. 95\% prediction intervals are gray. Predictive means and intervals seem appropriate. 
 
 ```{r , echo=F}
-emPred = mv.em.pred(calib$theta.hat,Xobs[1:n,,drop=F],estLS,XTdata,simBasis$Vt)
-Ypred = yPred.nobias(emPred$GPs,calib$ssq.hat,obsBasis$B,BtBinv,1000,Ydata$obs, ysamp = T)
-#mean(sqrt(Ypred$YVar))
+support = 'obs'
+yPred = get_ypred(Xobs,mvcData,calib,1000,support,bias=F,ysamp=T)
 
+if(support=='obs'){
+  time_id = time_obs[[1]]
+  phi_id = phi_obs
+}else if(support=='sim'){
+  time_id = as.numeric(time)
+  phi_id = phi
+}
 par(mfrow=c(2,2), mai = c(0.1, 0.1, 0.1, 0.1))
 for(i in 1:n){
-  plot_surf(Ypred$YMean[,i],time_obs[[i]],phi_obs,shade=.1,zlim=c(0,max(Ypred$YMean[,i])),alpha=.75,col='black')
-  plot_surf(Ydata$obs$orig[,i],time_obs[[i]],phi_obs,zlim=c(0,2),
-            shade = .001, add=T, col='orange', alpha=.5)
-  plot_surf(Ypred$YInt[[i]][,1],time_obs[[n+1]],phi_obs,zlim=c(0,2),
+  plot_surf(yPred$yMean[,i],time_id,phi_id,shade=.1,zlim=c(0,max(yPred$yMean[,i])),alpha=.75,col='black')
+  plot_surf(Ydata$obs$orig[,i],time_obs[[1]],phi_obs,zlim=c(0,2),
+            shade = .001, add=T ,col='orange', alpha=.5)
+  plot_surf(yPred$yInt[[i]][,1],time_id,phi_id,zlim=c(0,2),
           shade = .0001, add=T, col='grey', alpha=.5)
-  plot_surf(Ypred$YInt[[i]][,2],time_obs[[n+1]],phi_obs,zlim=c(0,2),
+  plot_surf(yPred$yInt[[i]][,2],time_id,phi_id,zlim=c(0,2),
           shade = .0001, add=T, col='grey', alpha=.5)
 }
 
@@ -159,16 +175,22 @@ XobsNew = as.matrix(data_dict$Xobs[n+1,])
 XTdataNew = transform_xt(Xsim,Tsim,XobsNew)
 YdataNew = transform_y(Ysim,YindSim,YobsNew,YindObs,center = T,scale = T)
 obsBasisNew = get_obs_basis(simBasis,YdataNew$obs$trans,YindSim,YindObs,sigY=ifelse(sd_true>0,sd_true^2,1))
-BtBinvNew = solve(t(obsBasisNew$B)%*%obsBasisNew$B + diag(1e-8,nPC))
 SCinputsNew = get_SC_inputs(estLS,XTdataNew,nPC)
 
-emPredNew = mv.em.pred(calib$theta.hat,XobsNew,estLS,XTdataNew,simBasis$Vt)
-YpredNew = yPred.nobias(emPredNew$GPs,calib$ssq.hat,obsBasisNew$B,BtBinvNew,1000,YdataNew$obs,ysamp = T)
-plot_surf(YpredNew$YMean,time_obs[[n+1]],phi_obs,shade=.1,zlim=c(0,max(YpredNew$YMean)),alpha=.75,col='blue')
-plot_surf(YobsNew,time_obs[[n+1]],phi_obs,zlim=c(0,2),
+mvcDataNew = list(XTdata=XTdataNew,
+               Ydata=YdataNew,
+               simBasis=simBasis,
+               obsBasis=obsBasisNew,
+               estLS=estLS,
+               SCinputs=SCinputsNew)
+
+yPredNew = get_ypred(XobsNew,mvcDataNew,calib,1000,support,F,T)
+plot_surf(yPredNew$yMean,time_id,phi_id,shade=.1,zlim=c(0,max(yPredNew$yMean)),alpha=.75,col='blue')
+plot_surf(YobsNew,time_obs[[1]],phi_obs,zlim=c(0,2),
           shade = .001, add=T, col='orange', alpha=.5)
-plot_surf(YpredNew$YInt[[1]][,1],time_obs[[n+1]],phi_obs,zlim=c(0,2),
+plot_surf(yPredNew$yInt[[1]][,1],time_id,phi_id,zlim=c(0,2),
           shade = .0001, add=T, col='grey', alpha=.5)
-plot_surf(YpredNew$YInt[[1]][,2],time_obs[[n+1]],phi_obs,zlim=c(0,2),
+plot_surf(yPredNew$yInt[[1]][,2],time_id,phi_id,zlim=c(0,2),
           shade = .0001, add=T, col='grey', alpha=.5)
 ```
+

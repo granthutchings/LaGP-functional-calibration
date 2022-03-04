@@ -14,6 +14,7 @@ Here we consider the same Implosion experiment, however this time we add a perio
 ```{r depends, echo=F, include=F}
 library(reticulate)
 library(plot3D)
+library(crs)
 source_python('SepiaImplosionExperimentData.py')
 source('../../mv_calib_lagp.R')
 
@@ -97,15 +98,23 @@ XTdata = transform_xt(Xsim,Tsim,Xobs,Tobs)
 Ydata = transform_y(Ysim,YindSim,Yobs,YindObs,center = T,scale = T)
 
 simBasis = get_basis(Ydata$sim$trans,nPC)
-obsBasis = get_obs_basis(simBasis,Ydata$obs$trans,YindSim,YindObs,sigY=ifelse(sd_true>0,sd_true^2,1))
+obsBasis = get_obs_basis(simBasis,Ydata$obs$trans,YindSim,YindObs,
+                         sigY=ifelse(sd_true>0,sd_true^2,1))
 
 estLS = mv_lengthscales(XTdata,simBasis$Vt,g=1e-7)
 SCinputs = get_SC_inputs(estLS,XTdata,nPC)
+
+mvcData = list(XTdata=XTdata,
+               Ydata=Ydata,
+               simBasis=simBasis,
+               obsBasis=obsBasis,
+               estLS=estLS,
+               SCinputs=SCinputs)
 ```
 
 ```{r, echo=F}
-obs_ids = mclapply(1:n, function(i) seq(i,dim(Ydata$obs$orig)[2],n))
-BtBinv = solve(t(obsBasis$B)%*%obsBasis$B + diag(1e-10,nPC))
+# obs_ids = mclapply(1:n, function(i) seq(i,dim(Ydata$obs$orig)[2],n))
+# BtBinv = solve(t(obsBasis$B)%*%obsBasis$B + diag(1e-10,nPC))
 # testthat::expect_equal(obsBasis$B%*%obsBasis$Vt,Ydata$obs$trans,check.attributes = FALSE)
 ```
 
@@ -113,40 +122,44 @@ Here we nearly find the correct $t^*=c(.5,.5)$. This is somewhat unexpected actu
 
 ```{r, echo=FALSE}
 nT = 13^2
-ux = seq(.01,.99,length.out=as.integer(sqrt(nT)))
-tCalib = expand.grid(ux,ux)
-calib.bias = mv.calib.bias(tCalib,
-         SCinputs,
-         estLS,
-         Ydata,
-         simBasis$Vt,
-         obsBasis,
-         thetaHat = T)
-ggplot(calib.bias$ll_df, aes(x = theta1, y = theta2, col = ll)) +
-  geom_point(size = 3) +
-  scale_color_viridis_c() + geom_point(aes(x=calib.bias$theta.hat[1],y=calib.bias$theta.hat[2]),col='red',size=1) +
-  geom_point(aes(x=.5,y=.5),col='black',size=1) + ggtitle('Calibration likelihood')
+tInit = dopt.gp(nT, Xcand = lhs(nT*100, matrix(rep(c(0,1),SCinputs$pT),nrow=2,byrow=T)))$XX 
+calib = mv.calib.snomadr(mvcData,tInit,nrestarts=1,bias=T)
+
+ggplot(calib$ll_df, aes(x = theta1, y = theta2, col = ll)) +
+  geom_point(size = 3) + scale_color_viridis_c() +  ggtitle('Calibration likelihood')
+```
+
+```{r, echo=F}
+cat('t*:',calib$theta.hat)
 ```
 
 Unsurprisingly predictions 1-3 are very good. That is because we are predicting on data that trained the discrepancy model. Predictive intervals are also quite tight. When we move to out-of-sample prediction, we do correctly capture the shape of the discrepancy, but there is a clear under-prediction problem. This may simply be that three data points is not nearly enough to expect decent out-of-sample prediction.
 
 ```{r , echo=F}
-Ypred = yPred.bias(calib.bias$theta.hat.orig,Xobs,estLS,XTdata,simBasis$Vt,calib.bias$dfit,obsBasis$B,1000)
-# mean(sqrt(Ypred$YVar))
-YemMean = calib.bias$bias$emGPs$yMean * Ydata$obs$sd + Ydata$obs$mean
-YdiscMean = calib.bias$dfit$disc$basis$B %*% calib.bias$dfit$disc$wMean * Ydata$obs$sd
+support = 'obs'
+yPred = get_ypred(Xobs,mvcData,calib,1000,support,bias=T)
+
+if(support=='obs'){
+  time_id = time_obs[[1]]
+  phi_id = phi_obs
+}else if(support=='sim'){
+  time_id = as.numeric(time)
+  phi_id = phi
+}
+
 par(mfrow=c(2,2), mai = c(0.1, 0.1, 0.1, 0.1))
 for(i in 1:n){
-  plot_surf(Ypred$YMean[,i],time_obs[[i]],phi_obs,shade=.1,zlim=c(0,max(Ypred$YMean[,i])),alpha=.75,col='blue')
-  plot_surf(YemMean[,i],time_obs[[i]],phi_obs,zlim=c(0,2),
+  plot_surf(yPred$yMean[,i],time_id,phi_id,shade=.1,zlim=c(0,max(yPred$yMean[,i])),
+            alpha=.75,col='blue',main=paste0('x = ',round(data_dict$Xobs[i],3)))
+  plot_surf(yPred$etaMean[,i],time_id,phi_id,zlim=c(0,2),
             shade = .01, add=T, col='lightblue',alpha=.5)
-  plot_surf(YdiscMean[,i],time_obs[[i]],phi_obs,zlim=c(0,2),
+  plot_surf(yPred$deltaMean[,i],time_id,phi_id,zlim=c(0,2),
             shade = .01, add=T, col='lightblue',alpha=.5)
-  plot_surf(Ydata$obs$orig[,i],time_obs[[i]],phi_obs,zlim=c(0,2),
+  plot_surf(Ydata$obs$orig[,i],time_obs[[1]],phi_obs,zlim=c(0,2),
             shade = .001, add=T, col='orange', alpha=.5)
-  plot_surf(Ypred$YInt[[i]][,1],time_obs[[n+1]],phi_obs,zlim=c(0,2),
+  plot_surf(yPred$yInt[[i]][,1],time_id,phi_id,zlim=c(0,2),
           shade = .00001, add=T, col='lightgrey', alpha=.5)
-  plot_surf(Ypred$YInt[[i]][,2],time_obs[[n+1]],phi_obs,zlim=c(0,2),
+  plot_surf(yPred$yInt[[i]][,2],time_id,phi_id,zlim=c(0,2),
           shade = .00001, add=T, col='lightgrey', alpha=.5)
 }
 
@@ -155,19 +168,26 @@ XobsNew = as.matrix(data_dict$Xobs[n+1,])
 XTdataNew = transform_xt(Xsim,Tsim,XobsNew)
 YdataNew = transform_y(Ysim,YindSim,YobsNew,YindObs,center = T,scale = T)
 obsBasisNew = get_obs_basis(simBasis,YdataNew$obs$trans,YindSim,YindObs,sigY=ifelse(sd_true>0,sd_true^2,1))
-BtBinvNew = solve(t(obsBasisNew$B)%*%obsBasisNew$B + diag(1e-8,nPC))
 SCinputsNew = get_SC_inputs(estLS,XTdataNew,nPC)
-
-YpredNew = yPred.bias(calib.bias$theta.hat.orig,XobsNew,estLS,XTdataNew,simBasis$Vt,calib.bias$dfit,obsBasisNew$B,nsamples = 1000)
-plot_surf(YpredNew$YMean,time_obs[[n+1]],phi_obs,shade=.1,zlim=c(0,max(YpredNew$YMean)),alpha=.75,col='blue')
-plot_surf(YpredNew$emMean,time_obs[[n+1]],phi_obs,zlim=c(0,2),
+mvcDataNew = list(
+  XTdata=XTdataNew,
+  Ydata=YdataNew,
+  simBasis=simBasis,
+  obsBasis=obsBasisNew,
+  estLS=estLS,
+  SCinputs=SCinputsNew
+)
+YpredNew = get_ypred(XobsNew,mvcDataNew,calib,1000,support,bias=T)
+plot_surf(YpredNew$yMean,time_id,phi_id,shade=.1,zlim=c(0,max(YpredNew$yMean)),
+          alpha=.75,col='blue',main=paste0('x = ',round(data_dict$Xobs[n+1],3)))
+plot_surf(YpredNew$etaMean,time_id,phi_id,zlim=c(0,2),
           shade = .01, add=T, col='lightblue',alpha=.5)
-plot_surf(YpredNew$discMean,time_obs[[n+1]],phi_obs,zlim=c(0,2),
+plot_surf(YpredNew$deltaMean,time_id,phi_id,zlim=c(0,2),
           shade = .01, add=T, col='lightblue',alpha=.5)
-plot_surf(YobsNew,time_obs[[n+1]],phi_obs,zlim=c(0,2),
+plot_surf(YobsNew,time_obs[[1]],phi_obs,zlim=c(0,2),
           shade = .001, add=T, col='orange', alpha=.5)
-plot_surf(YpredNew$YInt[[1]][,1],time_obs[[n+1]],phi_obs,zlim=c(0,2),
+plot_surf(YpredNew$yInt[[1]][,1],time_id,phi_id,zlim=c(0,2),
           shade = .00001, add=T, col='lightgrey', alpha=.5)
-plot_surf(YpredNew$YInt[[1]][,2],time_obs[[n+1]],phi_obs,zlim=c(0,2),
+plot_surf(YpredNew$yInt[[1]][,2],time_id,phi_id,zlim=c(0,2),
           shade = .00001, add=T, col='lightgrey', alpha=.5)
 ```

@@ -107,9 +107,7 @@ BtBinv = solve(t(obsBasis$B)%*%obsBasis$B + diag(1e-10,nPC))
 estLS = mv_lengthscales(XTdata,simBasis$Vt,g=1e-7)
 # stretch and compress inputs
 SCinputs = get_SC_inputs(estLS,XTdata,nPC)
-```
 
-```{r}
 mvcData = list(XTdata=XTdata,
                Ydata=Ydata,
                simBasis=simBasis,
@@ -123,15 +121,8 @@ We calibrate using the methods described in laGP_calibration.pdf. The ML estimat
 ```{r, echo=FALSE}
 nT = 50
 tInit = dopt.gp(nT, Xcand = lhs(nT*100, matrix(rep(c(0,1),SCinputs$pT),nrow=2,byrow=T)))$XX
-# mv.calib.nobias(tInit,
-#                         SCinputs,
-#                         estLS,
-#                         Ydata,
-#                         simBasis$Vt,
-#                         obsBasis,
-#                         BtBinv,
-#                         thetaHat=T)
-calib = mv.calib.snomadr(mvcData,tInit,1,F)
+
+calib = mv.calib(mvcData,tInit,1,F)
 ggplot(calib$ll_df, aes(x = theta1, y = theta2, col = ll)) +
      geom_point(size = 3) +
      scale_color_viridis_c() +
@@ -150,7 +141,7 @@ In the plots below the noisy observed data is in orange. Predictive means are in
 
 ```{r , echo=F}
 support = 'obs'
-yPred = get_ypred(Xobs,mvcData,calib,1000,support,bias=F,ysamp=T)
+yPred = get_ypred(Xobs,mvcData,calib,1000,support,bias=F)
 
 if(support=='obs'){
   time_id = time_obs[[1]]
@@ -184,7 +175,7 @@ mvcDataNew = list(XTdata=XTdataNew,
                estLS=estLS,
                SCinputs=SCinputsNew)
 
-yPredNew = get_ypred(XobsNew,mvcDataNew,calib,1000,support,F,T)
+yPredNew = get_ypred(XobsNew,mvcDataNew,calib,1000,support,bias=F)
 plot_surf(yPredNew$yMean,time_id,phi_id,shade=.1,zlim=c(0,max(yPredNew$yMean)),alpha=.75,col='blue')
 plot_surf(YobsNew,time_obs[[1]],phi_obs,zlim=c(0,2),
           shade = .001, add=T, col='orange', alpha=.5)

@@ -114,52 +114,50 @@ estLS = mv_lengthscales(XTdata,simBasis$Vt,g=1e-7)
 SCinputs = get_SC_inputs(estLS,XTdata,nPC)
 ```
 
-```{r, echo=F}
-obs_ids = mclapply(1:n, function(i) seq(i,dim(Ydata$obs$orig)[2],n))
-BtBinv = solve(t(obsBasis$B)%*%obsBasis$B + diag(1e-10,nPC))
-# testthat::expect_equal(obsBasis$B%*%obsBasis$Vt,Ydata$obs$trans,check.attributes = FALSE)
+```{r}
+mvcData = list(XTdata=XTdata,
+               Ydata=Ydata,
+               simBasis=simBasis,
+               obsBasis=obsBasis,
+               estLS=estLS,
+               SCinputs=SCinputs)
 ```
 
 ```{r, echo=FALSE}
-nT = 13^2
-ux = seq(.01,.99,length.out=as.integer(sqrt(nT)))
-tCalib = expand.grid(ux,ux)
-calib.bias = mv.calib.bias(tCalib,
-         SCinputs,
-         estLS,
-         Ydata,
-         simBasis$Vt,
-         obsBasis,
-         thetaHat = T)
-ggplot(calib.bias$ll_df, aes(x = theta1, y = theta2, col = ll)) +
-  geom_point(size = 3) +
-  scale_color_viridis_c() + geom_point(aes(x=calib.bias$theta.hat[1],y=calib.bias$theta.hat[2]),col='red',size=1) +
-  geom_point(aes(x=.5,y=.5),col='black',size=1) + ggtitle('Calibration likelihood')
+nT = 50
+tInit = dopt.gp(nT, Xcand = lhs(nT*100, matrix(rep(c(0,1),SCinputs$pT),nrow=2,byrow=T)))$XX
+
+calib = mv.calib(mvcData,tInit,nrestarts = 1,bias=T)
+ggplot(calib$ll_df, aes(x = theta1, y = theta2, col = ll)) +
+     geom_point(size = 3) +
+     scale_color_viridis_c() +
+     geom_point(aes(x=.5,y=.5),col='black',size=1) + ggtitle('')
+cat('t*:',calib$theta.hat)
 ```
 
 Predictions 1-3 show clear evidence of the discrepancy GP over-fitting, capturing too much noise with the angle effect. This is a problem when we move to out of sample prediction as we can see in the lower right plot. This would get better with more data, but we probably need a less flexible discrepancy model. We also see that estimated error variance is too small.
 
 ```{r error variance, echo=F}
-cat('Error Variance Estimation\ntrue sd:',sd_true,'\nest sd :',round(sqrt(calib.bias$dfit$ssq.hat.native),4))
+cat('Error Variance Estimation\ntrue sd:',sd_true,'\nest sd :',round(sqrt(calib$ssq.hat.orig),4))
 ```
 
 ```{r , echo=F}
-Ypred = yPred.bias(calib.bias$theta.hat.orig,Xobs,estLS,XTdata,simBasis$Vt,calib.bias$dfit,obsBasis$B,1000)
-#mean(sqrt(Ypred$YVar))
-YemMean = calib.bias$bias$emGPs$yMean * Ydata$obs$sd + Ydata$obs$mean
-YdiscMean = calib.bias$dfit$disc$basis$B %*% calib.bias$dfit$disc$wMean * Ydata$obs$sd
+yPred = get_ypred(Xobs,mvcData,calib,1000,support='obs',bias=T)
+#mean(sqrt(yPred$YVar))
+YemMean = calib$eta$yMean * Ydata$obs$sd + Ydata$obs$mean
+YdiscMean = calib$delta$basis$B %*% calib$delta$wMean * Ydata$obs$sd
 par(mfrow=c(2,2), mai = c(0.1, 0.1, 0.1, 0.1))
 for(i in 1:n){
-  plot_surf(Ypred$YMean[,i],time_obs[[i]],phi_obs,shade=.1,zlim=c(0,max(Ypred$YMean[,i])),alpha=.75,col='black')
+  plot_surf(yPred$yMean[,i],time_obs[[i]],phi_obs,shade=.1,zlim=c(0,max(yPred$yMean[,i])),alpha=.75,col='black')
   plot_surf(YemMean[,i],time_obs[[i]],phi_obs,zlim=c(0,2),
             shade = .01, add=T, col='lightblue',alpha=.5)
   plot_surf(YdiscMean[,i],time_obs[[i]],phi_obs,zlim=c(0,2),
             shade = .01, add=T, col='lightblue',alpha=.5)
   plot_surf(Ydata$obs$orig[,i],time_obs[[i]],phi_obs,zlim=c(0,2),
             shade = .001, add=T, col='orange', alpha=.5)
-  plot_surf(Ypred$YInt[[i]][,1],time_obs[[n+1]],phi_obs,zlim=c(0,2),
+  plot_surf(yPred$yInt[[i]][,1],time_obs[[n+1]],phi_obs,zlim=c(0,2),
           shade = .00001, add=T, col='lightgrey', alpha=.5)
-  plot_surf(Ypred$YInt[[i]][,2],time_obs[[n+1]],phi_obs,zlim=c(0,2),
+  plot_surf(yPred$yInt[[i]][,2],time_obs[[n+1]],phi_obs,zlim=c(0,2),
           shade = .00001, add=T, col='lightgrey', alpha=.5)
 }
 
@@ -170,17 +168,24 @@ YdataNew = transform_y(Ysim,YindSim,YobsNew,YindObs,center = T,scale = T)
 obsBasisNew = get_obs_basis(simBasis,YdataNew$obs$trans,YindSim,YindObs,sigY=ifelse(sd_true>0,sd_true^2,1))
 BtBinvNew = solve(t(obsBasisNew$B)%*%obsBasisNew$B + diag(1e-8,nPC))
 SCinputsNew = get_SC_inputs(estLS,XTdataNew,nPC)
-
-YpredNew = yPred.bias(calib.bias$theta.hat.orig,XobsNew,estLS,XTdataNew,simBasis$Vt,calib.bias$dfit,obsBasisNew$B,nsamples = 1000)
-plot_surf(YpredNew$YMean,time_obs[[n+1]],phi_obs,shade=.1,zlim=c(0,max(YpredNew$YMean)),alpha=.75,col='blue')
-plot_surf(YpredNew$emMean,time_obs[[n+1]],phi_obs,zlim=c(0,2),
+mvcDataNew = list(
+  XTdata=XTdataNew,
+  Ydata=YdataNew,
+  simBasis=simBasis,
+  obsBasis=obsBasisNew,
+  estLS=estLS,
+  SCinputs=SCinputsNew
+)
+yPredNew = get_ypred(XobsNew,mvcDataNew,calib,1000,support='obs',bias=T)
+plot_surf(yPredNew$yMean,time_obs[[n+1]],phi_obs,shade=.1,zlim=c(0,max(yPredNew$yMean)),alpha=.75,col='blue')
+plot_surf(yPredNew$etaMean,time_obs[[n+1]],phi_obs,zlim=c(0,2),
           shade = .01, add=T, col='lightblue',alpha=.5)
-plot_surf(YpredNew$discMean,time_obs[[n+1]],phi_obs,zlim=c(0,2),
+plot_surf(yPredNew$deltaMean,time_obs[[n+1]],phi_obs,zlim=c(0,2),
           shade = .01, add=T, col='lightblue',alpha=.5)
 plot_surf(YobsNew,time_obs[[n+1]],phi_obs,zlim=c(0,2),
           shade = .001, add=T, col='orange', alpha=.5)
-plot_surf(YpredNew$YInt[[1]][,1],time_obs[[n+1]],phi_obs,zlim=c(0,2),
+plot_surf(yPredNew$yInt[[1]][,1],time_obs[[n+1]],phi_obs,zlim=c(0,2),
           shade = .00001, add=T, col='lightgrey', alpha=.5)
-plot_surf(YpredNew$YInt[[1]][,2],time_obs[[n+1]],phi_obs,zlim=c(0,2),
+plot_surf(yPredNew$yInt[[1]][,2],time_obs[[n+1]],phi_obs,zlim=c(0,2),
           shade = .00001, add=T, col='lightgrey', alpha=.5)
 ```

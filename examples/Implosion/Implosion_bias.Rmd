@@ -112,19 +112,13 @@ mvcData = list(XTdata=XTdata,
                SCinputs=SCinputs)
 ```
 
-```{r, echo=F}
-# obs_ids = mclapply(1:n, function(i) seq(i,dim(Ydata$obs$orig)[2],n))
-# BtBinv = solve(t(obsBasis$B)%*%obsBasis$B + diag(1e-10,nPC))
-# testthat::expect_equal(obsBasis$B%*%obsBasis$Vt,Ydata$obs$trans,check.attributes = FALSE)
-```
-
 Here we nearly find the correct $t^*=c(.5,.5)$. This is somewhat unexpected actually. In biased calibration, we do not expect to recover the true calibration parameters because the calibration likelihood chooses the parameters such that the discrepancy model best fits the residuals between emulator and observed data. This is not necessarily when residuals are minimized, just when the likelihood of the model given the data is maximized.
 
 ```{r, echo=FALSE}
 nT = 13^2
-tInit = dopt.gp(nT, Xcand = lhs(nT*100, matrix(rep(c(0,1),SCinputs$pT),nrow=2,byrow=T)))$XX 
-calib = mv.calib.snomadr(mvcData,tInit,nrestarts=1,bias=T)
+tInit = dopt.gp(nT, Xcand = lhs(nT*100, matrix(rep(c(0.01,.99),SCinputs$pT),nrow=2,byrow=T)))$XX 
 
+calib = mv.calib(mvcData,tInit,3,T)
 ggplot(calib$ll_df, aes(x = theta1, y = theta2, col = ll)) +
   geom_point(size = 3) + scale_color_viridis_c() +  ggtitle('Calibration likelihood')
 ```

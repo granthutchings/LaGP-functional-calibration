@@ -4,6 +4,8 @@ library(laGP)
 library(tgp)
 library(parallel)
 library(pracma)
+library(mvtnorm)
+library(crs)
 
 # FUNCTION: ll_beta: log likelihood of beta(a,b) evaluated at x. Used as a prior on calibration parameters
 ll_beta = function(x,a,b){
@@ -63,7 +65,7 @@ mv_delta_predict = function(XpredOrig,calib,mvcData){
   }
   return(list(vMean=vMean,vVar=vVar))
 }
-get_ypred = function(XpredOrig,mvcData,calib,nsamples=1,support='obs',bias=F,ysamp=T){
+get_ypred = function(XpredOrig,mvcData,calib,nsamples=1,support='obs',bias=F){
   
   # emulator predictions
   eta = mv_eta_predict(calib$theta.hat.orig,XpredOrig,mvcData)
@@ -84,19 +86,10 @@ get_ypred = function(XpredOrig,mvcData,calib,nsamples=1,support='obs',bias=F,ysa
   if(!bias){
     # unbiased prediction
     ySamp = array(dim=c(nY,nsamples,n))
-    if(ysamp){
-      for(i in 1:n){
-        ySamp[,,i] = t(mvtnorm::rmvnorm(nsamples,mean=B%*%eta$wMean[,i,drop=F],
-                                        sigma = calib$ssq.hat*eye(nY) + B%*%diag(eta$wVar[,i])%*%t(B))) * 
-          ysd + ym
-      }
-    } else{
-      BtBinv = solve(t(B)%*%B)
-      for(i in 1:n){
-        zSamp = t(mvtnorm::rmvnorm(nsamples,mean=eta$wMean[,i],
-                                   sigma = calib$ssq.hat*BtBinv + diag(eta$wVar[,i])))
-        ySamp[,,i] = w_to_y(zSamp,B,ym,ysd)
-      }
+    for(i in 1:n){
+      ySamp[,,i] = t(mvtnorm::rmvnorm(nsamples,mean=B%*%eta$wMean[,i,drop=F],
+                                      sigma = calib$ssq.hat*eye(nY) + B%*%diag(eta$wVar[,i])%*%t(B))) * 
+        ysd + ym
     }
     yMean = apply(ySamp,c(1,3),mean)
     yVar = apply(ySamp,c(1,3),var)
@@ -202,7 +195,7 @@ aGPsep_SC_mv = function(X, Z, XX,
 # user when generating sim basis
 # mv.calib.bias for generating discrepancy basis
 }
-get_basis = function(Y, nPC = 1, pctVar = NULL){
+get_basis = function(Y, nPC = 1, pctVar = NULL, fullBasis=F){
 
   retList = list()
   
@@ -216,13 +209,19 @@ get_basis = function(Y, nPC = 1, pctVar = NULL){
   percentVar = zapsmall((svdY$d) / sum(svdY$d))
   if(!is.null(pctVar)){
     # percentage of variance explained specified
-    nPC = which.max(cumsum(percentVar)>pctVar)
+    nPC = which.max(cumsum(percentVar)>=pctVar)
   }
-  retList$nPC = nPC
-  retList$pctVar = percentVar[1:retList$nPC]
-  retList$B = as.matrix(retList$B[,1:retList$nPC,drop=F])
-  retList$Vt = as.matrix(retList$Vt[1:retList$nPC,,drop=F])
   
+  retList$nPC = nPC
+  if(fullBasis){
+    retList$pctVar = percentVar
+    retList$B = as.matrix(retList$B)
+    retList$Vt = as.matrix(retList$Vt)
+  } else{
+    retList$pctVar = percentVar[1:retList$nPC]
+    retList$B = as.matrix(retList$B[,1:retList$nPC,drop=F])
+    retList$Vt = as.matrix(retList$Vt[1:retList$nPC,,drop=F])
+  }
   return(retList)
 }
 
@@ -265,17 +264,15 @@ get_obs_basis = function(simBasis,Yobs,YindSim,YindObs,sigY=NULL){
     obsBasis$B = simBasis$B
   }
   # compute Vt
-  # THIS CALCULATION HAS CAUSED ME PROBLEMS
-  # If emulation isn't working, check that obs basis is correct
-  Bridge = 1e-6 * diag(rep(1,nPC)) # in case Bprod is ill-conditioned
-  if(!is.null(sigY)){
-    lamY = (1/sigY)*eye(dim(obsBasis$B)[1])
-  } else{
-    lamY = eye(dim(obsBasis$B)[1])
-  }
-  Bprod = t(obsBasis$B)%*%lamY%*%obsBasis$B
-  obsBasis$Vt = solve(Bprod + Bridge) %*% t(obsBasis$B)%*%lamY%*%Yobs
-  #obsBasis$Vt = pinv(obsBasis$B)%*%Yobs
+  # Bridge = 1e-6 * diag(rep(1,nPC)) # in case Bprod is ill-conditioned
+  # if(!is.null(sigY)){
+  #   lamY = (1/sigY)*eye(dim(obsBasis$B)[1])
+  # } else{
+  #   lamY = eye(dim(obsBasis$B)[1])
+  # }
+  # Bprod = t(obsBasis$B)%*%lamY%*%obsBasis$B
+  # obsBasis$Vt = solve(Bprod + Bridge) %*% t(obsBasis$B)%*%lamY%*%Yobs
+  obsBasis$Vt = solve(t(obsBasis$B)%*%obsBasis$B)%*%t(obsBasis$B)%*%Yobs
   return(obsBasis)
 }
 
@@ -483,7 +480,7 @@ sc_inputs = function(X,ls){
   return(sweep(X, 2, sqrt(ls), FUN = '/'))
 }
 
-get_negll = function(theta,mvcData,lite=T,bias=F){
+negll = function(theta,mvcData,lite=T,bias=T){
   nPC = nrow(mvcData$obsBasis$Vt)
   n = nrow(mvcData$SCinputs$Xobs[[1]])
   nY = nrow(mvcData$Ydata$obs$orig)
@@ -503,18 +500,18 @@ get_negll = function(theta,mvcData,lite=T,bias=F){
   
   # Predict from emulator at [Xobs,theta]
   eta = aGPsep_SC_mv(X=mvcData$SCinputs$XTsim,
-                       Z=lapply(1:nPC,function(j) mvcData$simBasis$Vt[j,]),
-                       XX=Xpred,
-                       Bobs = mvcData$obsBasis$B)
+                     Z=lapply(1:nPC,function(j) mvcData$simBasis$Vt[j,]),
+                     XX=Xpred,
+                     Bobs = mvcData$obsBasis$B)
   
   # residuals
   yDisc = mvcData$Ydata$obs$trans - w_to_y(eta$wMean,mvcData$obsBasis$B)
   ssq.hat = mean(yDisc^2)
-  
+  if(!lite){
+    yDiscOrig = mvcData$Ydata$obs$orig - w_to_y(eta$wMean,mvcData$obsBasis$B,mvcData$Ydata$obs$mean,mvcData$Ydata$obs$sd)
+    ssq.hat.orig = mean(yDiscOrig^2)
+  }
   if(bias){
-    if(!lite){
-      yDiscOrig = mvcData$Ydata$obs$orig - w_to_y(eta$wMean,mvcData$obsBasis$B,mvcData$Ydata$obs$mean,mvcData$Ydata$obs$sd)
-    }
     delta$GPs = vector(mode='list',length=nPC)
     delta$basis = get_basis(yDisc,pctVar = .95)
     for(k in 1:delta$basis$nPC){
@@ -522,8 +519,8 @@ get_negll = function(theta,mvcData,lite=T,bias=F){
       g = garg(g=NULL,y=delta$basis$Vt[k,])
       # Our responses have changed wrt to inputs, so we should not use d=1 anymore
       delta$GPs[[k]] <- newGPsep(X=mvcData$XTdata$obs$X$trans,
-                                Z=delta$basis$Vt[k,],
-                                d=d$start, g=g$start, dK=TRUE)
+                                 Z=delta$basis$Vt[k,],
+                                 d=d$start, g=g$start, dK=TRUE)
       cmle <- jmleGPsep(delta$GPs[[k]],
                         drange=c(d$min, d$max),
                         grange=c(g$min, g$max),
@@ -531,53 +528,60 @@ get_negll = function(theta,mvcData,lite=T,bias=F){
                         gab=g$ab)
       pred = predGPsep(delta$GPs[[k]], XX = mvcData$XTdata$obs$X$trans, lite=T)
       delta$wMean = rbind(delta$wMean, pred$mean)
-      # delta$wSigma[[k]] = pred$Sigma
       delta$wVar = rbind(delta$wVar, pred$s2)
       if(lite){
         deleteGPsep(delta$GPs[[k]])
       }
     }
     # new residuals (Y-emulator) - discrepancy estimate, this is mean zero
-    newDisc = yDisc - w_to_y(delta$wMean,delta$basis$B)
-    ssq.hat = mean(newDisc^2)
+    yDisc = yDisc - w_to_y(delta$wMean,delta$basis$B)
+    ssq.hat = mean(yDisc^2)
     if(!lite){
       newDiscOrig = yDiscOrig - w_to_y(delta$wMean,delta$basis$B,sd=mvcData$Ydata$obs$sd)
       ssq.hat.orig = mean(newDiscOrig^2)
     }
-    for(i in 1:n){
-      ll[i] = mvtnorm::dmvnorm(x=newDisc[,i],sigma=obsBasis$B%*%diag(eta$wVar[,i])%*%t(obsBasis$B) +
-                                   delta$basis$B%*%diag(delta$wVar[,i],nrow=delta$basis$nPC)%*%t(delta$basis$B) + 
-                                   ssq.hat*eye(nY),log = T)
-    }
+    nY = nrow(yDisc)
+    BD = cbind(mvcData$obsBasis$B,delta$basis$B)
   } else{
-    if(!lite){
-      yDiscOrig = mvcData$Ydata$obs$orig - w_to_y(eta$wMean,mvcData$obsBasis$B,mvcData$Ydata$obs$mean,mvcData$Ydata$obs$sd)
-      ssq.hat.orig = mean(yDiscOrig^2)
-    }
-    for(i in 1:n){
-      ll[i] = mvtnorm::dmvnorm(x=yDisc[,i],sigma=ssq.hat*eye(nY) + mvcData$obsBasis$B%*%diag(eta$wVar[,i])%*%t(mvcData$obsBasis$B),log=T)
-    }
+    BD = mvcData$obsBasis$B
   }
+  r = 1e-8
+  lambda = 1/ssq.hat
+  tBD = t(BD)
+  rankBD = rankMatrix(BD)
+  BDtBD = tBD%*%BD
+  if(rankBD != ncol(BD)){
+    BDtBDinv = solve(BDtBD + r*eye(nrow(BDtBD)))
+  } else{
+    BDtBDinv = solve(BDtBD) # need to get rid of solves to make code faster
+  }
+  ldetBDtBD = determinant(BDtBD)$modulus
+  eyenY = eye(nY)
+  Bhat = BDtBDinv%*%tBD%*%yDisc
   
-  # returns
-  if(!lite){
+  SigBhat = mclapply(1:n, function(i) as.matrix(diag(c(eta$wVar[,i],delta$wVar[,i])) + ssq.hat*BDtBDinv))
+  l_beta_hat = unlist(mclapply(1:n, function(i) dmvnorm(x=as.numeric(Bhat[,i]),sigma = SigBhat[[i]], log = T)))
+  ll = unlist(mclapply(1:n, function(i) -.5*((nY-rankBD)*log(2*pi*ssq.hat) + ldetBDtBD +
+                                                lambda*t(yDisc[,i])%*%(eyenY-BD%*%BDtBDinv%*%tBD)%*%yDisc[,i]) + 
+                                         l_beta_hat[i]))
+  if(lite){
+    return(-sum(ll))
+  } else{
     return = list()
     return$ssq.hat = ssq.hat
     return$ssq.hat.orig = ssq.hat.orig
     return$eta = eta
     return$delta = delta
     return(return)
-  } else{
-    return(-sum(ll))
   }
 }
-get_ll_df = function(tInit,mvcData,bias){
+ll_df = function(tInit,mvcData,bias){
   pT = mvcData$XTdata$pT
   tInitOrig = t(t(tInit) * mvcData$XTdata$sim$T$range + mvcData$XTdata$sim$T$min)
   
   ll = numeric(nrow(tInit))
-  for(i in 1:length(ll)){
-    ll[i] = -get_negll(tInit[i,,drop=F],mvcData,lite=T,bias=bias)
+  for(j in 1:length(ll)){
+    ll[j] = -negll(tInit[j,,drop=F],mvcData,lite=T,bias=bias)
   }
   
   ll_df = as.data.frame(matrix(cbind(ll,as.matrix(tInit),tInitOrig),nrow=length(ll),ncol=2*pT+1))
@@ -587,146 +591,34 @@ get_ll_df = function(tInit,mvcData,bias){
   
   return(ll_df)
 }
-mv.calib.snomadr = function(mvcData,tInit,nrestarts,bias=F,
+mv.calib = function(mvcData,tInit,nrestarts,bias=F,
                             opts=list("MAX_BB_EVAL" = 1000, "INITIAL_MESH_SIZE" = .1,
                                       "MIN_POLL_SIZE" = "r0.001", "DISPLAY_DEGREE" = 0)){
   # get initial calibration ll on tInit
-  ll_df = get_ll_df(tInit,mvcData,bias=bias)
+  ll_df = ll_df(tInit,mvcData,bias=bias)
   
   if(nrestarts>nrow(ll_df)){
     nrestarts=nrow(ll_df)
   }
   llorder = order(ll_df$ll,decreasing = T)[1:nrestarts]
   tinit = cbind(ll_df$theta1[llorder],ll_df$theta2[llorder])
-
+  
   out = NULL
   for(i in 1:nrestarts){
-      outi = snomadr(get_negll, n = mvcData$SCinputs$pT, bbin = rep(0, mvcData$SCinputs$pT), bbout = 0, 
-                     x0 = tinit[i,],
-                     lb = rep(.01, mvcData$SCinputs$pT), 
-                     ub = rep(.99, mvcData$SCinputs$pT),
-                     opts = opts,
-                     mvcData = mvcData,
-                     lite=T,
-                     bias=bias)
-      if(is.null(out) || outi$objective < out$objective) out <- outi
+    outi = snomadr(negll, n = mvcData$SCinputs$pT, bbin = rep(0, mvcData$SCinputs$pT), bbout = 0, 
+                   x0 = tinit[i,],
+                   lb = rep(.01, mvcData$SCinputs$pT), 
+                   ub = rep(.99, mvcData$SCinputs$pT),
+                   opts = opts,
+                   mvcData = mvcData,
+                   lite=T,
+                   bias=bias)
+    if(is.null(out) || outi$objective < out$objective) out <- outi
   }
-  return = get_negll(matrix(out$solution,nrow=1),mvcData,lite=F,bias=bias)
+  return = negll(matrix(out$solution,nrow=1),mvcData,lite=F,bias=bias)
   return$theta.hat = out$solution
   return$theta.hat.orig = out$solution * mvcData$XTdata$sim$T$range + mvcData$XTdata$sim$T$min
   return$snomadr = out
   return$ll_df = ll_df
   return(return)
 }
-  
-  
-mv.calib.nobias = function(tInit,SCinputs,estLS,Ydata,simVt,obsBasis,BtBinv,thetaHat=F){
-  nPC = obsBasis$nPC
-  n = ncol(Ydata$obs$orig)
-  tInitOrig = t(t(tInit) * XTdata$sim$T$range + XTdata$sim$T$min)
-  
-  get_ll_ssq = function(theta){
-    # transform theta by estimated length-scales
-    thetaSC = mclapply(1:nPC, function(j) sc_inputs(theta,estLS$T[[j]]))
-    # make prediction matrix from Xobs and theta
-    if(SCinputs$pT>1){
-      Xpred = lapply(1:nPC, function(j) cbind(SCinputs$Xobs[[j]],t(replicate(n,thetaSC[[j]],simplify='matrix'))))
-    } else{
-      Xpred = lapply(1:nPC, function(j) cbind(SCinputs$Xobs[[j]],t(t(replicate(n,thetaSC[[j]],simplify='matrix')))))
-    }
-    
-    
-    # Predict from emulator at [Xobs,theta]
-    eta = aGPsep_SC_mv(X=SCinputs$XTsim,
-                         Z=lapply(1:nPC,function(j) simVt[j,]),
-                         XX=Xpred,
-                         Bobs = obsBasis$B)
-  
-    # residuals
-    wDisc = obsBasis$Vt - eta$wMean
-    yDisc = Ydata$obs$trans - w_to_y(eta$wMean,obsBasis$B)
-    yDiscOrig = Ydata$obs$orig - w_to_y(eta$wMean,obsBasis$B,mean=Ydata$obs$mean,sd=Ydata$obs$sd)
-    # error variance estimate
-    ssq.hat = mean(yDisc^2)
-    ssq.hat.orig = mean(yDiscOrig^2)
-    # likelihood
-    ll = numeric(n)
-    for(i in 1:n){
-      ll[i] = mvtnorm::dmvnorm(x=wDisc[,i],sigma=ssq.hat*BtBinv+diag(eta$wVar[,i]),log=T)
-    }
-    ll = sum(ll) #+ n*sum(ll_beta(theta,2,2))
-    # return vector with first element likelihood and second element error variance estimate
-    return(c(ll,ssq.hat,ssq.hat.orig))
-  }
-  ll_df = matrix(nrow=nrow(tInit),ncol=3+SCinputs$pT)
-  ll_df = data.frame(cbind(matrix(unlist(mclapply(1:nrow(tInit), function(i) get_ll_ssq(tInit[i,,drop=F]))),ncol=3,byrow = T),tInit))
-  colnames(ll_df) = c('ll','ssq.std','ssq.orig',paste0("theta",1:SCinputs$pT))
-  if(thetaHat){
-    theta.hat.id = which.max(ll_df$ll)
-    theta.hat = as.matrix(tInit[theta.hat.id,,drop=F],nrow=1)
-    theta.hat.orig = as.matrix(tInitOrig[theta.hat.id,,drop=F],nrow=1)
-    ssq.hat = ll_df$ssq.std[theta.hat.id]
-    ssq.hat.orig = ll_df$ssq.orig[theta.hat.id]
-    return(list(ll_df=ll_df,theta.hat=theta.hat,theta.hat.orig=theta.hat.orig,
-                ssq.hat=ssq.hat,ssq.hat.orig=ssq.hat.orig))
-  } else{
-    return(ll_df)
-  }
-}
-
-mv.calib.nobias_yllh = function(tInit,mvcData,thetaHat=F){
-  nPC = mvcData$obsBasis$nPC
-  n = ncol(mvcData$Ydata$obs$orig)
-  nY = nrow(mvcData$Ydata$obs$orig)
-  tInitOrig = t(t(tInit) * mvcData$XTdata$sim$T$range + mvcData$XTdata$sim$T$min)
-  
-  get_ll_ssq = function(theta){
-    # transform theta by estimated length-scales
-    thetaSC = mclapply(1:nPC, function(j) sc_inputs(theta,mvcData$estLS$T[[j]]))
-    # make prediction matrix from Xobs and theta
-    Xpred = lapply(1:nPC, function(j) cbind(mvcData$SCinputs$Xobs[[j]],t(replicate(n,thetaSC[[j]],simplify='matrix'))))
-    
-    # Predict from emulator at [Xobs,theta]
-    eta = aGPsep_SC_mv(X=mvcData$SCinputs$XTsim,
-                         Z=lapply(1:nPC,function(j) mvcData$simBasis$Vt[j,]),
-                         XX=Xpred,
-                         Bobs = mvcData$obsBasis$B)
-    
-    # residuals
-    wDisc = mvcData$obsBasis$Vt - eta$wMean
-    yDisc = mvcData$Ydata$obs$trans - w_to_y(eta$wMean,mvcData$obsBasis$B)
-    yDiscOrig = mvcData$Ydata$obs$orig - w_to_y(eta$wMean,mvcData$obsBasis$B,mean=mvcData$Ydata$obs$mean,sd=mvcData$Ydata$obs$sd)
-    # error variance estimate
-    ssq.hat = mean(yDisc^2)
-    ssq.hat.orig = mean(yDiscOrig^2)
-    #ssq.hat = apply(yDisc^2,2,mean)
-    #ssq.hat.orig = apply(yDiscOrig^2,2,mean)
-    # likelihood
-    ll = numeric(n)
-    for(i in 1:n){
-      ll[i] = mvtnorm::dmvnorm(x=yDisc[,i],sigma=ssq.hat*eye(nY) + mvcData$obsBasis$B%*%diag(eta$wVar[,i])%*%t(mvcData$obsBasis$B),log=T)
-      #ll[i] = mvtnorm::dmvnorm(x=yDisc[,i],sigma=ssq.hat[i]*eye(nY) + obsBasis$B%*%diag(eta$wVar[,i])%*%t(obsBasis$B),log=T)
-    }
-    ll = sum(ll) #+ n*sum(ll_beta(theta,2,2))
-    # return vector with first element likelihood and second element error variance estimate
-    return(c(ll,mean(ssq.hat),mean(ssq.hat.orig)))
-  }
-  
-  ll_df = matrix(nrow=nrow(tInit),ncol=3+SCinputs$pT)
-  ll_df = data.frame(cbind(matrix(unlist(mclapply(1:nrow(tInit), function(i) get_ll_ssq(tInit[i,,drop=F]))),ncol=3,byrow = T),tInit))
-  
-  colnames(ll_df) = c('ll','ssq.std','ssq.orig',paste0("theta",1:pT))
-  if(thetaHat){
-    theta.hat.id = which.max(ll_df$ll)
-    theta.hat = as.matrix(tInit[theta.hat.id,,drop=F],nrow=1)
-    theta.hat.orig = as.matrix(tInitOrig[theta.hat.id,,drop=F],nrow=1)
-    ssq.hat = ll_df$ssq.std[theta.hat.id]
-    ssq.hat.orig = ll_df$ssq.orig[theta.hat.id]
-    return(list(ll_df=ll_df,theta.hat=theta.hat,theta.hat.orig=theta.hat.orig,
-                ssq.hat=ssq.hat,ssq.hat.orig=ssq.hat.orig))
-  } else{
-    return(list(ll_df=ll_df))
-  }
-}
-
-

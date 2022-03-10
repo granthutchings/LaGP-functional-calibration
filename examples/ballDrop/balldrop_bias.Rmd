@@ -4,6 +4,7 @@ author: "Grant Hutchings"
 date: "2/23/2022"
 output: pdf_document
 ---
+
 ```{r setup, echo=F, include=F}
 knitr::opts_knit$set(root.dir = "~/Desktop/laGP Project/examples/ballDrop")
 ```
@@ -15,14 +16,11 @@ library(crs)
 source("../../mv_calib_lagp.R")
 ```
 
-This example is an extension of the unbiased ball drop example where we now work with a biased simulator. We will generate our observations from the same function as before
-\[
+This example is an extension of the unbiased ball drop example where we now work with a biased simulator. We will generate our observations from the same function as before $$
 t(d) = \frac{acosh(\exp\{Cd/R\})}{\sqrt{Cg/R}}
-\]
-and our simulations from 
-\[
+$$ and our simulations from $$
 t(d) = \frac{acosh(\exp\{Cd/R\})}{(Cg/R)^{1/4}}.
-\]
+$$
 
 ```{r data, echo=F}
 C_true = .1
@@ -91,7 +89,7 @@ matplot(YindObs,Yobs,type='l',lty=1,add=T)
 legend('topleft',inset=c(.05,.05),legend=c('simulations','field observations'),lty=1,col=c('orange','black'))
 ```
 
-Just like in the unbiased case we begin by first pre-scaling the inputs to the unit hypercube, and standardizing the outputs to mean zero and unit variance. We then generate basis representations of our outputs, and strech and compress inputs based on length-scale estimates from a full GP on a subset of the simulations.
+Just like in the unbiased case we begin by first pre-scaling the inputs to the unit hyper-cube, and standardizing the outputs to mean zero and unit variance. We then generate basis representations of our outputs, and stretch and compress inputs based on length-scale estimates from a full GP on a subset of the simulations.
 
 ```{r precomputing}
 # step 0: Pre-scale data
@@ -105,9 +103,7 @@ obsBasis = get_obs_basis(simBasis,Ydata$obs$trans,YindSim,YindObs,sigY=ifelse(sd
 # step 2: get length-scale estimates and stretch + compress input space
 estLS = mv_lengthscales(XTdata,simBasis$Vt,g=1e-7)
 SCinputs = get_SC_inputs(estLS,XTdata,nPC)
-```
 
-```{r}
 mvcData = list(XTdata=XTdata,
                Ydata=Ydata,
                simBasis=simBasis,
@@ -116,24 +112,21 @@ mvcData = list(XTdata=XTdata,
                SCinputs=SCinputs)
 ```
 
-```{r, echo=F}
-# obs_ids = mclapply(1:n, function(i) seq(i,dim(Ydata$obs$orig)[2],n))
-# obs_means = mclapply(1:n, function(i) apply(Ydata$obs$orig[,obs_ids[[i]],drop=F],1,mean))
-# BtBinv = solve(t(obsBasis$B)%*%obsBasis$B + diag(1e-8,nPC))
-```
-
 Calibration proceeds as described in the document laGP_calibration.pdf. The calibration likelihood has some interesting gradients which may be due to different number of PC's being chosen for the discrepancy basis. We use the likelihoods evaluated on this space-filling grid to determine suitable initial values of $t$ for the snomadr optimization algorithm.
 
-```{r calib}
+```{r calibration}
 nT = 13^2
-tInit = dopt.gp(nT, Xcand = lhs(nT*100, matrix(rep(c(0,1),SCinputs$pT),nrow=2,byrow=T)))$XX 
-#calib.init = mv.calib.bias(tCalib,mvcData)
-calib = mv.calib.snomadr(mvcData,tInit,nrestarts=1,bias=T)
+tInit = dopt.gp(nT, Xcand = lhs(nT*100, matrix(rep(c(0.01,.99),SCinputs$pT),nrow=2,byrow=T)))$XX 
+
+calib = mv.calib(mvcData,tInit,nrestarts=3,bias=T)
+
+# plot of initial calibration results
 ggplot(calib$ll_df, aes(x = theta1, y = theta2, col = ll)) +
   geom_point(size = 3) +  scale_color_viridis_c()
 ```
 
 ```{r, echo=F}
+# results from snomadr
 cat('t*:',calib$theta.hat)
 ```
 
@@ -162,7 +155,7 @@ legend('topleft',inset=c(.05,.05),legend=paste0('Mean Pred Variance: ',round(mea
 
 The out-of-sample data we would like to predict is shown in green on the plot below and is firmly within the range of both observations and simulations.
 
-Prediction is much worse this new location, with our 95\% prediction interval missing the data at all points. This may the the best we can hope for using a flexible discrepancy model like a GP trained on 5 data points.
+Prediction is much worse this new location, with our 95% prediction interval missing the data at all points. This may the the best we can hope for using a flexible discrepancy model like a GP trained on 5 data points.
 
 ```{r new Y prediction, echo=F}
 XobsNew = as.matrix(.075)

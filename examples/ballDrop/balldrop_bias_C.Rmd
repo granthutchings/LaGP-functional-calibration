@@ -1,0 +1,268 @@
+---
+title: "Ball Drop Example, Bias"
+author: "Grant Hutchings"
+date: "2/23/2022"
+output: pdf_document
+---
+
+```{r setup, echo=F, include=F}
+knitr::opts_knit$set(root.dir = "~/Desktop/laGP Project/examples/ballDrop")
+```
+
+```{r depends, echo=F,include=F}
+library(reticulate)
+library(parallel)
+library(crs)
+source("../../mv_calib_lagp.R")
+```
+
+This example is an extension of the unbiased ball drop example where we now work with a biased simulator. We will generate our observations from the same function as before $$
+t(d) = \frac{acosh(\exp\{Cd/R\})}{\sqrt{Cg/R}}
+$$ and our simulations from $$
+t(d) = \frac{acosh(\exp\{Cd/R\})}{(Cg/R)^{1/4}}.
+$$
+
+```{r data, echo=F}
+C_true = .1
+g_true = 9.8
+sd_true = 0.1 # sd of observation error
+# try making up a function where C,g have no interplay (additive)
+t_at_h = function(C,h,R,g){
+  return(acosh(exp(C*h/R))/sqrt(C*g/R))
+}
+t_at_h_sim = function(C,h,R,g){
+  return(acosh(exp(C*h/R))/(C*g/R)^(1/4))
+}
+
+pX = 1
+pT = 1
+n = 5; reps = 1
+m = 36
+nPC = 2
+
+# sim data
+set.seed(11)
+XTsim = tgp::lhs(m,matrix(c(.025,.3, # cover range of Xobs
+                            C_true-.1,C_true+.05),nrow=pX+pT,ncol=2,byrow = T))
+Xsim=as.matrix(XTsim[,1])
+Tsim=as.matrix(XTsim[,2])
+YindSim = as.matrix(seq(1,25,1))
+Ysim = matrix(nrow=length(YindSim),ncol=m)
+for(i in 1:m){
+  Ysim[,i] = t_at_h_sim(C=Tsim[i,1],h=YindSim,R=Xsim[i],g=g_true)
+}
+# obs data
+Xobs = as.matrix(rep(seq(.05,.25,length.out=n),reps))
+Tobs = matrix(rep(C_true,n*reps),ncol=1,byrow = T)
+YindObs = as.matrix(c(5,10,15,20))
+#YindObs = YindSim
+Yobs = matrix(nrow=length(YindObs),ncol=n*reps)
+Ytrue = matrix(nrow=length(YindObs),ncol=n*reps)
+
+k = 0
+for(i in 1:n){
+  for(j in 1:reps){
+    k = k+1
+    Ytrue[,k] = t_at_h(C=C_true,h=YindObs,R=Xobs[k],g=g_true)
+    Yobs[,k] = Ytrue[,k] + rnorm(nrow(Yobs),0,sd_true)
+  }
+}
+
+matplot(YindSim,Ysim,type='l',col='orange',xlab='distance (m)',ylab='time (s)')
+matplot(YindObs,Yobs,pch=1,add=T,col='black')
+matplot(YindObs,Yobs,type='l',lty=1,add=T,col='black')
+legend('topleft',inset=c(.05,.05),legend=c('simulations','field observations'),lty=1,col=c('orange','black'))
+```
+
+Lets visualize the discrepancy by comparing simulation data and observed data at the same inputs. Observed data is shown as solid lines and simulation data as dashed lines, colors correspond to the 5 different input settings.
+
+```{r, echo=F}
+simAtObs = Yobs
+for(i in 1:n){
+  simAtObs[,i] = t_at_h_sim(C_true,h=YindObs,R=Xobs[i],g=g_true)
+}
+
+matplot(YindObs,simAtObs,type='l',xlab='distance (m)',ylab='time (s)',ylim=c(0,20),lty=2)
+matplot(YindObs,Yobs,pch=1,add=T)
+matplot(YindObs,Yobs,type='l',lty=1,add=T)
+legend('topleft',inset=c(.05,.05),legend=c('simulations','field observations'),lty=1,col=c('orange','black'))
+```
+
+Just like in the unbiased case we begin by first pre-scaling the inputs to the unit hyper-cube, and standardizing the outputs to mean zero and unit variance. We then generate basis representations of our outputs, and stretch and compress inputs based on length-scale estimates from a full GP on a subset of the simulations.
+
+```{r precomputing}
+# step 0: Pre-scale data
+XTdata = transform_xt(Xsim,Tsim,Xobs,Tobs)
+Ydata = transform_y(Ysim,YindSim,Yobs,YindObs,center = T,scale = T, scaletype = 'scalar')
+
+# step 1: get basis
+simBasis = get_basis(Ydata$sim$trans,nPC)
+obsBasis = get_obs_basis(simBasis,Ydata$obs$trans,YindSim,YindObs)
+
+# Add linear discrepancy
+Dsim = matrix(c(rep(1,nrow(YindSim)),YindSim),ncol=2)
+Dobs = matrix(c(rep(1,nrow(YindObs)),YindObs),ncol=2)
+Dobs = Dobs/sqrt(max(t(Dsim)%*%Dsim))
+Dsim = Dsim/sqrt(max(t(Dsim)%*%Dsim))
+
+simBasis$D = Dsim
+obsBasis$D = Dobs
+
+# step 2: get length-scale estimates and stretch + compress input space
+estLS = mv_lengthscales(XTdata,simBasis$Vt,g=1e-7)
+SCinputs = get_SC_inputs(estLS,XTdata,nPC)
+
+mvcData = list(XTdata=XTdata,
+               Ydata=Ydata,
+               simBasis=simBasis,
+               obsBasis=obsBasis,
+               estLS=estLS,
+               SCinputs=SCinputs,
+               YindObs=YindObs,
+               YindSim=YindSim)
+py_save_object(mvcData,'bd_bias_C_data.pkl')
+```
+
+```{r}
+plot_wz_pairs(simBasis$Vt,obsBasis$Vt,legend=T)
+```
+
+We start by evaluating the likelihood on a sparse grid, then use the best results as initial values of $t$ for the snomadr optimization algorithm.
+
+```{r calibration}
+nT = 100
+tCalib = matrix(seq(.01,.99,length.out=100))
+init = calib.init(tCalib,mvcData,bias=T,sample=F)
+plot(init$theta1,init$ll,ylab='ll',xlab='t')
+calib = mv.calib(mvcData,init,nrestarts=10,bias=T,sample=F)
+```
+
+```{r, echo=F}
+cat('t*:', calib$theta.hat,'\n')
+cat('estimated error variance:', calib$ssq.hat.orig,'\n')
+```
+
+```{r mcmc, echo=F}
+do.mcmc = F
+if(do.mcmc){
+  Rprof("Rprof.out")
+  mcmc.out = mcmc(mvcData,tInit=init$theta1[which.max(init$ll)],bias=T,nsamples=10000,nburn=1000,prop.var=.2)
+  Rprof(NULL)
+  summaryRprof("Rprof.out")
+  save(mcmc.out,file='bd_bias_mcmc.RData')
+} else{
+  load('bd_bias_mcmc.RData')
+}
+plot(mcmc.out$t.samp,type='l',ylab='t',xlab='iteration')
+plot(mcmc.out$ssq.samp,type='l',ylab='error variance',xlab='iteration')
+par(mfrow=c(1,2))
+hist(mcmc.out$t.samp,main='',xlab='t'); hist(mcmc.out$ssq.samp,main='',xlab='error variance')
+```
+
+And similarly to `balldrop_nobias_C.Rmd` we compare predictions from the point estimate calibration and MCMC calibration. Prediction from the point estimate mostly covers the data, but there may be some issues with overconfidence at the smallest heights.
+
+```{r, echo=F}
+yPred = ypred_mle(mvcData$XTdata$obs$X$orig[1:n,,drop=F],mvcData,calib,1000,'obs',bias=T)
+for(i in 1:n){
+  matplot(YindObs[,1],Ydata$obs$orig[,i,drop=F],pch=1,col=i+1,add=ifelse(i==1,F,T),ylim=c(0,12),
+          xlab='height',ylab='time',main='')
+  #points(YindObs[,1],Ytrue[,i],col='black')
+  #lines(YindObs[,1],yPred$etaMean[,i],col=i+1,lty=6)
+  lines(YindObs[,1],yPred$yMean[,i],col=i+1)
+  lines(YindObs[,1],yPred$yInt[[i]][,1],type='l',col=i+1,lty=2)
+  lines(YindObs[,1],yPred$yInt[[i]][,2],type='l',col=i+1,lty=2)
+}
+```
+
+We see notable wider confidence intervals, especially for small heights.
+
+```{r}
+tsamp = matrix(sample(mcmc.out$t.samp,1000))
+yPred = ypred_mcmc(mvcData$XTdata$obs$X$orig[1:n,,drop=F],mvcData,tsamp,support='obs',bias=T)
+```
+
+```{r, echo=F}
+for(i in 1:n){
+  matplot(YindObs[,1],Ydata$obs$orig[,i,drop=F],pch=1,col=i+1,add=ifelse(i==1,F,T),ylim=c(0,12),
+          xlab='height',ylab='time',main='')
+  #points(YindObs[,1],Ytrue[,i],col='black')
+  #lines(YindObs[,1],yPred$etaMean[,i],col=i+1,lty=6)
+  lines(YindObs[,1],yPred$mean[,i],col=i+1)
+  lines(YindObs[,1],yPred$conf.int[1,,i],type='l',col=i+1,lty=2)
+  lines(YindObs[,1],yPred$conf.int[2,,i],type='l',col=i+1,lty=2)
+}
+```
+
+# Prediction at new location
+
+The out-of-sample data we would like to predict is shown in green on the fist plot. The second plot shows predictions from MCMC calibration in red and point estimate calibration in green. The point estimate predictions are overconfident at small heights, and in the case of $x=.075$ the mean misses the true values. Mean predictions from the MCMC calibration are good for all $x$'s and we are not overconfident for small heights.
+
+```{r new Y prediction}
+set.seed(11)
+XobsNew = as.matrix(c(.075,.125,.175,.225))
+YobsNew = matrix(nrow=length(YindObs),ncol=nrow(XobsNew))
+for(j in 1:nrow(XobsNew)){
+  YobsNew[,j] = t_at_h(C=C_true,h=YindObs,R=XobsNew[j],g=g_true) + rnorm(length(YindObs),0,sd_true)
+}
+
+matplot(YindSim,Ysim,col='orange',type='l',lty=2)
+matplot(YindObs,Yobs,col='black',type='b',lty=1,pch=1,add=T)
+matplot(YindObs,YobsNew,col='green',type='b',lty=1,pch=1,add=T)
+
+XTdataNew = transform_xt(Xsim,Tsim,XobsNew)
+YdataNew = transform_y(Ysim,YindSim,YobsNew,YindObs,center = T,scale = T,scaletype = 'scalar')
+obsBasisNew = get_obs_basis(simBasis,YdataNew$obs$trans,YindSim,YindObs,sigY=ifelse(sd_true>0,sd_true^2,1))
+obsBasisNew$D = Dobs
+SCinputsNew = get_SC_inputs(estLS,XTdataNew,nPC)
+
+mvcDataNew = list(XTdata=XTdataNew,
+               Ydata=YdataNew,
+               simBasis=simBasis,
+               obsBasis=obsBasisNew,
+               estLS=estLS,
+               SCinputs=SCinputsNew,
+               YindObs=YindObs,
+               YindSim=YindSim)
+py_save_object(mvcDataNew,'bd_bias_oos_C.pkl')
+
+support = 'sim'
+if(support=='obs'){
+  predInd = YindObs[,1]
+} else if(support=='sim'){
+  predInd = YindSim[,1]
+}
+
+calib = mv.calib(mvcData,init,nrestarts=10,bias=T,sample=F)
+YpredMLE = ypred_mle(XobsNew,mvcDataNew,calib,1000,support = support,bias=T)
+YpredMCMC = ypred_mcmc(XobsNew,mvcDataNew,tsamp,support = support,bias=T)
+```
+
+```{r, echo=F}
+# par(mfrow=c(2,2),mar=c(4,4,0,0))
+# ylab = c(1,3); xlab = c(3,4)
+# for(i in 1:nrow(XobsNew)){
+#   matplot(YindObs,YdataNew$obs$orig[,i],pch=1,col='black',
+#         xlab=ifelse(i %in% xlab,'distance',''),ylab=ifelse(i %in% ylab,'time',''),main='',ylim=c(0,12),xlim=c(0,25),axes=F)
+#   axis(1,labels=ifelse(i %in% xlab,T,F))
+#   axis(2,labels=ifelse(i %in% ylab,T,F))
+#   #lines(YindObs[,1],YobsTrue,col='black')
+#   lines(predInd,YpredMLE$yMean[,i],col='green')
+#   lines(predInd,YpredMLE$yInt[[i]][,1],type='l',col='green',lty=2)
+#   lines(predInd,YpredMLE$yInt[[i]][,2],type='l',col='green',lty=2)
+#   lines(predInd,YpredMCMC$mean[,i],col='red')
+#   lines(predInd,YpredMCMC$conf.int[1,,i],type='l',col='red',lty=2)
+#   lines(predInd,YpredMCMC$conf.int[2,,i],type='l',col='red',lty=2)
+# }
+for(i in 1:nrow(XobsNew)){
+  matplot(YindObs,YdataNew$obs$orig[,i],pch=1,col='black',
+        xlab='distance',ylab='time',main='',ylim=c(0,12),xlim=c(0,25))
+  #lines(YindObs[,1],YobsTrue,col='black')
+  lines(predInd,YpredMLE$yMean[,i],col='green')
+  lines(predInd,YpredMLE$yInt[[i]][,1],type='l',col='green',lty=2)
+  lines(predInd,YpredMLE$yInt[[i]][,2],type='l',col='green',lty=2)
+  lines(predInd,YpredMCMC$mean[,i],col='red')
+  lines(predInd,YpredMCMC$conf.int[1,,i],type='l',col='red',lty=2)
+  lines(predInd,YpredMCMC$conf.int[2,,i],type='l',col='red',lty=2)
+  legend('topleft',inset=c(.05,.05),legend=c('MLE','MCMC'),col=c('green','red'),lty=2)
+}
+```

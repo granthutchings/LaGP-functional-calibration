@@ -1,0 +1,258 @@
+---
+title: "Ball Drop Example, No Bias"
+author: "Grant Hutchings"
+date: "2/23/2022"
+output: pdf_document
+---
+
+```{r setup, echo=F, include=FALSE}
+knitr::opts_knit$set(root.dir = "~/Desktop/laGP Project/examples/ballDrop")
+```
+
+```{r depends, echo=F, include=FALSE}
+library(reticulate)
+library(parallel)
+library(crs)
+source("../../mv_calib_lagp.R")
+```
+
+In this example we consider the experiment of dropping different sized balls from a tower and recording the time at certain distances during the fall. We will generate time data at distance traveled d from the equation $$
+t(d) = \frac{acosh(\exp\{Cd/R\})}{\sqrt{Cg/R}}
+$$ where $C$ is the coefficient of drag, $R$ is the radius of the ball, and $g$ is the gravitational constant. We will generate both field observations and computer simulation data from this function. Five sets of field observations will use the values $C=.1,\;g=9.8$ and $R=\{.05,.1,.15,.2,.25\;(m)\}$, while computer simulations will be evaluated over a space filling design of $(R,C,g)$ tuples in the domain $R\in(.025,.3),\;C\in(.05,.15),\;g\in(7.8,10.8)$. The drag coefficient and the gravitational constant are parameters to be calibrated while $R$ is a controlled input.
+
+During this tutorial we will detail how to do emulation, calibration, and prediction using our library functions.
+
+```{r , echo=FALSE}
+C_true = .1
+g_true = 9.8
+sd_true = 0.1 # sd of observation error
+# try making up a function where C,g have no interplay (additive)
+t_at_h = function(C,h,R,g){
+  return(acosh(exp(C*h/R))/sqrt(C*g/R))
+}
+
+pX = 1
+pT = 1
+n = 5; reps = 1
+m = 25
+nPC = 2
+
+# sim data
+set.seed(11)
+XTsim = tgp::lhs(m,matrix(c(.025,.3, # cover range of Xobs
+                            C_true-.05,C_true+.05),
+                          nrow=pX+pT,ncol=2,byrow = T)) # cover g_true
+Xsim=as.matrix(XTsim[,1])
+Tsim=as.matrix(XTsim[,2])
+YindSim = as.matrix(seq(1,25,1))
+Ysim = matrix(nrow=length(YindSim),ncol=m)
+for(i in 1:m){
+  Ysim[,i] = t_at_h(C=Tsim[i],h=YindSim,R=Xsim[i],g=g_true)
+}
+# obs data
+Xobs = as.matrix(rep(seq(.05,.25,length.out=n),reps))
+Tobs = matrix(rep(C_true,n*reps))
+YindObs = as.matrix(c(5,10,15,20))
+#YindObs = YindSim
+Yobs = matrix(nrow=length(YindObs),ncol=n*reps)
+Ytrue = matrix(nrow=length(YindObs),ncol=n*reps)
+
+k = 0
+for(i in 1:n){
+  for(j in 1:reps){
+    k = k+1
+    Ytrue[,k] = t_at_h(C=C_true,h=YindObs,R=Xobs[k],g=g_true)
+    Yobs[,k] = Ytrue[,k] + rnorm(nrow(Yobs),0,sd_true)
+  }
+}
+```
+
+First, lets visualize our experiments and simulations. We have the five experiments shown in black, where time observations are recorded at four distances, 5, 10, 15, and 20 meters from the drop. White noise is added to the data with $\sigma_y=.1$. Our computer model is evaluated on a much denser grid of distances; every 1.5 seconds from .5 seconds to 24.5. Below we see the height time curves for both simulation and experiment. Our simulations cover the range of experiment, which is desirable so that our emulator does not have to extrapolate.
+
+# Step 0: Pre-scale data
+
+The first step for using our package is to pre-scale the data. We scale all inputs to the computer model to lie in the unit interval. We will denote controllable inputs as $x$ and calibration parameters at $t$. Here we have $x = \{R\}$ and $t=\{C,g\}$. Scaling to the unit interval is done using the function `transform_xt()` which accepts at minimum a matrix `Xsim` which has, as columns, the $R$ (controllable inputs) values passed into the simulator. In an emulation only problem `Xsim` is all we need. Here we are interested in calibration as well so we pass in a matrix `Tsim`, which has as columns the $C,g$ values used to generate our simulated data. In this example we have $m=25$ simulations so $\texttt{Xsim}\in\mathbb{R}^{m \times 1}$ and $\texttt{Tsim}\in\mathbb{R}^{25 \times 2}$. We also pass in a matrix $\texttt{Xobs}\in\mathbb{R}^{n \times 1}$ which contains the $n$ experimental values of $R$. Additionally, for testing problems where the true value of the calibration parameters are known, a matrix `Tobs` can be passed to the function. The purpose of this is to have a stored copy of the true parameter values scaled similarly to `Tsim`.
+
+Next we will scale the computer simulation outputs $\texttt{Ysim}\in\mathbb{R}^{n_s\times m}$ where $n_s$ is length of the simulation height-time curves (i.e. the number of distances we have time measurements for). We also scale `Yobs` using the scaling determined by `Ysim.` We scale the simulations so that at each distance location, the times are mean zero and unit variance. Responses are scaled using the function `transform_y` which accepts the simulator data `Ysim` as well as a matrix of the locations (distances) where the observations are taken `YindSim`. Similarly for the field observations we pass in $\texttt{Yobs}\in\mathbb{R}^{n_y \times n},\texttt{YindObs}\in\mathbb{R}^{n_y \times 1}$ where $n_y$ is the number of distances for which times are recorded. The function also accepts arguments which control the type of scaling. `center` and `scale` are flags indicating if the data should be centered to mean zero and scaled to variance one. `scaletype` can be one of 'rowwise' or 'scalar'. rowwise scales each location to be variance one, and scalar scales the entire suite of simulations to be variance one. We recommend using rowwise scaling unless there is a location with no variability, meaning we cannot divide by the standard error at that location.
+
+```{r data transformations}
+XTdata = transform_xt(Xsim,Tsim,Xobs,Tobs)
+Ydata = transform_y(Ysim,YindSim,Yobs,YindObs,center = T,scale = T, scaletype='scalar')
+```
+
+```{r data vis, echo=FALSE}
+matplot(YindSim,Ydata$sim$orig,type='l',col='orange',xlab='distance (m)',ylab='time (s)')
+matplot(YindObs,Ydata$obs$orig,pch=1,add=T,col='black')
+matplot(YindObs,Ydata$obs$orig,type='l',lty=1,add=T,col='black')
+legend('topleft',inset=c(.05,.05),legend=c('simulations','field observations'),lty=1,col=c('orange','black'))
+
+matplot(YindSim,Ydata$sim$trans,type='l',col='orange',xlab='distance (m)',ylab='time (s)')
+matplot(YindObs,Ydata$obs$trans,pch=1,add=T,col='black')
+matplot(YindObs,Ydata$obs$trans,type='l',lty=1,add=T,col='black')
+legend('topleft',inset=c(.05,.05),legend=c('simulations','field observations'),lty=1,col=c('orange','black'))
+```
+
+# Step 1: get basis
+
+Next we decompose our data using an orthogonal basis decomposition, namely the singular value decomposition. We first create a basis for our simulations using the function `get_basis()` which accepts our simulator responses that have already been scaled by `transform_xt()` as well as `nPC`, the number of basis vectors to use. If you do not know a-priori how many basis vectors you would like to use, the parameter $\texttt{pctVar}\in(0,1)$ can be specified indicating that the decomposition should retain enough basis vectors to account for a certain percentage of the variability in the data. We then generate the basis for the field observations, using the basis for the simulations with the function `get_obs_basis`. At this point you will recognize all the inputs to this function except for `sigY`. This value defaults to one, and has no effect if not specified. If one has an idea of the error variance for the field observations this can be passed in here and will be used when producing basis vectors.
+
+```{r}
+simBasis = get_basis(Ydata$sim$trans,nPC)
+obsBasis = get_obs_basis(simBasis,Ydata$obs$trans,YindSim,YindObs)
+#obsBasis$B%*%obsBasis$Vt - Ydata$obs$trans
+```
+
+It may be useful to visualize the basis weights for both the simulations and the observations. We see that some of the weights from the field observations are not within the cloud of weights from the simulator. This is not ideal as our models will be doing some extrapolation to predict the observed data.
+
+```{r}
+plot_wz_pairs(simBasis$Vt,obsBasis$Vt,legend=T)
+```
+
+# Step 2: get lengthscale estimates and stretch + compress input space
+
+Next we will globally estimate length-scale parameters for the laGP models using a subset of the simulations. This is done using the function `mv_lengthscales()` which accepts the output from `transform_xt()` as well as the simulation basis weights. Lastly you can specify a value for the nugget, we use `g` in accordance with the laGP package. These global length-scale estimates are a key aspect of the model. The inputs are scaled according to these inputs, which eliminates the need for future length-scale estimation during emulation and calibration, greatly increasing speed. We use the function `get_SC_inputs()` to scale the inputs. This function accepts the outputs from `mv_lengthscales()` and `transform_xt()` and returns an object similar to `XTdata`, but containing scaled inputs.
+
+```{r }
+estLS = mv_lengthscales(XTdata,simBasis$Vt,g=1e-7)
+SCinputs = get_SC_inputs(estLS,XTdata,nPC)
+```
+
+```{r}
+mvcData = list(XTdata=XTdata,
+               Ydata=Ydata,
+               simBasis=simBasis,
+               obsBasis=obsBasis,
+               estLS=estLS,
+               SCinputs=SCinputs,
+               YindObs=YindObs,
+               YindSim=YindSim)
+py_save_object(mvcData,'bd_nobias_C_data.pkl')
+```
+
+# Step 3: calibrate over grid of t values
+
+Now we can calibrate over a range of possible $C$ values. First suppose we are only interested in a point estimate of $t^*$. In this case, we begin by evaluating the likelihood over a sparse grid of candidate values using the function $\texttt{calib.init}$ with $\texttt{tCalib}$ a matrix of candidates. Here we specify $\texttt{sample=F}$ indicating that we will use the emulator mean rather than sampling from the emulator. This is important as sampling from the emulator will introduce uncertainty in our estimate of $t^*$. We plot the results of the sparse grid search and see that we have a very well behaved likelihood. By passing the sorted list of likelihood evaluations in $\texttt{init}$ to the calibration function $\texttt{mv.calib}$ we initialize our optimization algorithm at good starting locations.
+
+```{r calibration}
+nT = 100
+tCalib = matrix(seq(.01,.99,length.out=nT))
+init = calib.init(tCalib,mvcData,bias=F,sample=F)
+plot(init$theta1,init$ll,ylab='ll',xlab='t')
+calib = mv.calib(mvcData,init,nrestarts=10,optimize=T,bias=F,sample=F)
+cat('t*:', calib$theta.hat,'\n')
+cat('estimated error variance:', calib$ssq.hat.orig,'\n')
+```
+
+The more likely scenario is that we are interested in uncertainty. In this case we use a MH-MCMC algorithm to sample from the posterior distribution of $t^*$.
+
+```{r mcmc, echo=F}
+# compare this to mcmc dist
+mcmc.out = mcmc(mvcData,tInit=init$theta1[which.max(init$ll)],bias=F,nsamples=10000,nburn=1000,prop.var = .08)
+plot(mcmc.out$t.samp,type='l')
+plot(mcmc.out$ssq.samp,type='l')
+hist(mcmc.out$t.samp);abline(v=mean(mcmc.out$t.samp),col='red')
+hist(mcmc.out$ssq.samp);abline(v=mean(mcmc.out$ssq.samp),col='red')
+```
+
+# Prediction at observed locations
+
+We now show how to predict from our emulator at both observed and new input settings. Since our emulator is not trained on the observed data, predictive assessment at $\texttt{Xobs}$ is of interest. Here we find that prediction using the point estimate and mcmc samples are nearly identical in both mean and uncertainty.
+
+Prediction using mcmc results is done with the function `ypred_mcmc()` passing in a matrix of samples of $t^*$ to use for prediction. We also specify that we would like to predict on the full support of heights from $1m$ to $25m$ by setting $\texttt{support='sim'}$. $\texttt{support='obs'}$ will return predictions only at the points $\texttt{YindObs}$.
+
+```{r, echo=F}
+support = 'sim'
+if(support=='obs'){
+  predInd = YindObs[,1]
+} else if(support=='sim'){
+  predInd = YindSim[,1]
+}
+tsamp = matrix(sample(mcmc.out$t.samp,1000))
+yPred = ypred_mcmc(mvcData$XTdata$obs$X$orig[1:n,,drop=F],mvcData,tsamp,support=support,bias=F)
+for(i in 1:n){
+  matplot(YindObs[,1],Ydata$obs$orig[,i,drop=F],pch=1,col=i+1,add=ifelse(i==1,F,T),ylim=c(0,12),
+          xlab='height',ylab='time',main='MCMC predictions',xlim=c(0,25))
+  #points(predInd,Ytrue[,i],col='black')
+  #lines(predInd,yPred$etaMean[,i],col=i+1,lty=6)
+  lines(predInd,yPred$mean[,i],col=i+1)
+  lines(predInd,yPred$conf.int[1,,i],type='l',col=i+1,lty=2)
+  lines(predInd,yPred$conf.int[2,,i],type='l',col=i+1,lty=2)
+}
+```
+
+We use the function `ypred_mle()` to make predictions from our emulator at a point estimate of $t^*$ use the function `ypred_mle()` with the $\texttt{calib}$ object which contains the MLE of \(t^*\). We find that our mcmc predictions produce a slightly wider confidence band, but the mean predictions are indistinguishable from each other.
+
+```{r}
+support = 'sim'
+if(support=='obs'){
+  predInd = YindObs[,1]
+} else if(support=='sim'){
+  predInd = YindSim[,1]
+}
+yPred = ypred_mle(Xobs[1:n,,drop=F],mvcData,calib,1000,bias=F,support=support)
+obs_ids = mclapply(1:n, function(i) seq(i,dim(Ydata$obs$orig)[2],n))
+obs_means = mclapply(1:n, function(i) apply(Ydata$obs$orig[,obs_ids[[i]],drop=F],1,mean))
+for(i in 1:n){
+  matplot(YindObs[,1],Ydata$obs$orig[,obs_ids[[i]],drop=F],pch=1,col=i+1,add=ifelse(i==1,F,T),xlim=c(0,25),ylim=c(0,12),
+          xlab='distance',ylab='time',main='Point Estimate Predictions')
+  #points(YindObs[,1],Ytrue[,i],col='black')
+  lines(predInd,yPred$yMean[,i],col=i+1)
+  lines(predInd,yPred$yInt[[i]][,1],type='l',col=i+1,lty=2)
+  lines(predInd,yPred$yInt[[i]][,2],type='l',col=i+1,lty=2)
+}
+```
+
+# Prediction at new location that was not included for calibration
+
+We can also compare these two methods for inputs that were not used in calibration. Below we plot four new experiments in green. In the second plot, predictions using mcmc are shown in red and point estimate predictions in green. Again there is almost no difference between them for this simple problem.
+
+```{r new Y prediction, echo=F}
+set.seed(11)
+XobsNew = as.matrix(c(.075,.125,.175,.225))
+YobsNew = matrix(nrow=length(YindObs),ncol=nrow(XobsNew))
+YobsTrue = matrix(nrow=length(YindObs),ncol=nrow(XobsNew))
+for(j in 1:nrow(XobsNew)){
+  YobsTrue[,j] = t_at_h(C=C_true,h=YindObs,R=XobsNew[j,],g=g_true)
+  YobsNew[,j] = YobsTrue[,j] + rnorm(nrow(YobsNew),0,sd_true)
+}
+
+matplot(YindSim,Ysim,col='orange',type='l',lty=2,ylab='time',xlab='distance',main='')
+matplot(YindObs,Yobs,col='black',type='b',lty=1,pch=1,add=T)
+matplot(YindObs,YobsNew,col='green',type='b',lty=1,pch=1,add=T)
+
+XTdataNew = transform_xt(Xsim,Tsim,XobsNew)
+YdataNew = transform_y(Ysim,YindSim,YobsNew,YindObs,center = T,scale = T,scaletype = 'scalar')
+obsBasisNew = get_obs_basis(simBasis,YdataNew$obs$trans,YindSim,YindObs)
+SCinputsNew = get_SC_inputs(estLS,XTdataNew,nPC)
+
+mvcDataNew = list(XTdata=XTdataNew,
+               Ydata=YdataNew,
+               simBasis=simBasis,
+               obsBasis=obsBasisNew,
+               estLS=estLS,
+               SCinputs=SCinputsNew)
+py_save_object(mvcDataNew,'bd_nobias_oos_C.pkl')
+
+# MCMC
+yPredMCMC = ypred_mcmc(XobsNew,mvcDataNew,tsamp,support=support,bias=F)
+
+# Point Estimate
+yPredPoint = ypred_mle(XobsNew,mvcDataNew,calib,1000,support=support,bias=F)
+
+# Compare
+par(mfrow=c(2,2),mar=c(4,4,0,0))
+ylab = c(1,3); xlab = c(3,4)
+for(i in 1:nrow(XobsNew)){
+  matplot(YindObs,YdataNew$obs$orig[,i],pch=1,col='black',
+        xlab=ifelse(i %in% xlab,'distance',''),ylab=ifelse(i %in% ylab,'time',''),main='',ylim=c(0,12),xlim=c(0,25),axes=F)
+  axis(1,labels=ifelse(i %in% xlab,T,F))
+  axis(2,labels=ifelse(i %in% ylab,T,F))
+  #lines(YindObs[,1],YobsTrue,col='black')
+  lines(predInd,yPredPoint$yMean[,i],col='green')
+  lines(predInd,yPredPoint$yInt[[i]][,1],type='l',col='green',lty=2)
+  lines(predInd,yPredPoint$yInt[[i]][,2],type='l',col='green',lty=2)
+  lines(predInd,yPredMCMC$mean[,i],col='red')
+  lines(predInd,yPredMCMC$conf.int[1,,i],type='l',col='red',lty=2)
+  lines(predInd,yPredMCMC$conf.int[2,,i],type='l',col='red',lty=2)
+}
+```

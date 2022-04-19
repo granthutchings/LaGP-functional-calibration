@@ -818,6 +818,7 @@ tune_step_sizes = function(mvcData,nburn,nlevels,target_acc=NULL){
   #     step.sizes[i,j] = step.default * base^ex[i]
   #   }
   # }
+  pT = mvcData$XTdata$pT
   step.sizes = matrix(logseq(.01,2,n=nlevels),nrow=nlevels,ncol=pT,byrow = F)
   
   acc = matrix(nrow=nlevels,ncol=pT)

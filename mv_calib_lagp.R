@@ -142,6 +142,9 @@ ypred_mcmc = function(XpredOrig,mvcData,tsamp,support='obs',bias=F){
   for(i in 1:nrow(tsamp)){
     tmp = mv.calib(mvcData,tsamp[i,],bias=bias,sample=T,optimize=F)
     if(bias){
+      for(j in 1:length(tmp$delta$GPs)){
+        deleteGPsep(tmp$delta$GPs[[j]])
+      }
       mu = B%*%tmp$eta$wSamp + D%*%tmp$delta$wSamp
     } else{
       mu = B%*%tmp$eta$wSamp
@@ -149,9 +152,6 @@ ypred_mcmc = function(XpredOrig,mvcData,tsamp,support='obs',bias=F){
     sigma = tmp$ssq.hat*eye(nY)
     for(j in 1:nrow(XpredOrig)){
         ysamp[i,,j] = rmvnorm(1,mean=mu[,j],sigma=sigma) * ysd + ym
-    }
-    for(j in 1:length(tmp$delta$GPs)){
-      deleteGPsep(tmp$delta$GPs[[j]])
     }
   }
   mean = apply(ysamp,2:3,mean)
@@ -698,7 +698,7 @@ mv.calib = function(mvcData,init,nrestarts=1,bias=F,sample=T,optimize=T,
   return(return)
 }
 
-mcmc = function(mvcData,tInit,bias=F,nsamples=100,nburn=10,prop.var=.025){
+mcmc = function(mvcData,tInit,bias=F,nsamples=100,nburn=10,prop.step=rep(.025,mvcData$XTdata$pT),verbose=F){
   ll_mcmc = function(theta){
     nPC = nrow(mvcData$obsBasis$Vt)
     n = nrow(mvcData$SCinputs$Xobs[[1]])
@@ -760,41 +760,84 @@ mcmc = function(mvcData,tInit,bias=F,nsamples=100,nburn=10,prop.var=.025){
     # compute simple llh - Sigma_w and Sigma_v are accounted for in calc of yDisc
     ldetS = nY*log(ssq.hat)
     Sinv = (1/ssq.hat)*eye(nY)
-    ll = sum(apply(yDisc,2,function(d) -.5*(ldetS + d%*%Sinv%*%d))) - log(ssq.hat) + dbeta(theta,1.3,1.3,log=T)
+    ll = sum(apply(yDisc,2,function(d) -.5*(ldetS + d%*%Sinv%*%d))) - log(ssq.hat) + sum(dbeta(theta,2,2,log=T))
     
     return( list(ll=ll,ssq=ssq.hat) )
   }
   ptm = proc.time()
-  # 1. Initialize at tInit
   t = tInit
   ssq = ll_mcmc(t)$ssq
   llProp = list()
-  accept=0
+  accept = matrix(0,nrow=1,ncol=pT)
   t.store = matrix(nrow=nsamples,ncol=mvcData$XTdata$pT);t.store[1,] = t
   ssq.store = numeric(nsamples);ssq.store[1] = ssq
+
   for(i in 2:nsamples){
-    if(mod(i,nsamples/10)==0){cat(100*(i/nsamples),'% ')}
-    # 2. Sample t from proposal
-    #tProp = rnorm(mvcData$XTdata$pT,t,prop.var)
-    tProp = t + (prop.var * runif(1,-0.5, 0.5)) # sepia proposal
-    # 3. Compute acceptance probability
-    if(tProp<0 | tProp>1){
-      llProp$ll = -Inf
-    } else{
-      llProp = ll_mcmc(tProp)
+    if(verbose){
+      if(mod(i,nsamples/10)==0){cat(100*(i/nsamples),'% ')}
     }
-    llt = ll_mcmc(t)
-    # 4. Accept or reject t
-    if(log(runif(1)) < (llProp$ll - llt$ll)){
-      t = tProp
-      ssq = llProp$ssq
-      accept = accept + 1
+
+    for(j in 1:pT){
+      tProp = t # initialize tProp to t so that the parameter we are not updating is fixed at its previous value
+      tProp[j] = t[j] + (prop.step[j] * runif(1,-0.5, 0.5))
+      if(tProp[j]<0 | tProp[j]>1){
+        llProp$ll = -Inf
+      } else{
+        llProp = ll_mcmc(tProp)
+      }
+      llt = ll_mcmc(t)
+      # 4. Accept or reject t
+      if(log(runif(1)) < (llProp$ll - llt$ll)){
+        t[j] = tProp[j]
+        ssq = llProp$ssq
+        accept[j] = accept[j] + 1
+      }
+      t.store[i,j] = t[j]
     }
-    t.store[i,] = t
+    # store ssq after both updates have been made
     ssq.store[i] = ssq
   }
   mcmc.time = ptm-proc.time()
   return(list(t.samp=t.store[(nburn+1):nsamples,],ssq.samp=ssq.store[nburn+1:nsamples],
               acpt.ratio=accept/nsamples,
               time=mcmc.time))
+}
+
+tune_step_sizes = function(mvcData,nburn,nlevels,target_acc=NULL){
+  # t.default = .5
+  # step.default = .2
+  # step.sizes = matrix(nrow=nlevels,ncol=pT)
+  # ex = seq(-(nlevels - 1)/2, (nlevels - 1)/2, length.out=nlevels)
+  # for(i in 1:nlevels){
+  #   for(j in 1:pT){
+  #     if(ex[i] <= 0){
+  #       base = 2.0
+  #     } else{
+  #       base = 20^(2/(nlevels-1))
+  #     }
+  #     step.sizes[i,j] = step.default * base^ex[i]
+  #   }
+  # }
+  step.sizes = matrix(logseq(.01,2,n=nlevels),nrow=nlevels,ncol=pT,byrow = F)
+  
+  acc = matrix(nrow=nlevels,ncol=pT)
+  for(i in 1:nlevels){
+    acc[i,] = mcmc(mvcData,tInit = rep(.5,pT),bias=mvcData$bias,nsamples = nburn,prop.step = step.sizes[i,])$acpt.ratio
+  }
+
+  # Compute GLM for each parameter
+  step.tuned = numeric(pT)
+  if(is.null(target_acc)){
+    target_logit = rep(log(1 / (exp(1) - 1)),pT)
+  } else{
+    target_logit = logit(target_acc)
+  }
+  for(j in 1:pT){
+      y = cbind(acc[,j]*nburn,nburn-(acc[,j]*nburn))
+      x = cbind(log(step.sizes[,j]))
+      glm_model = glm(y~x,family=binomial(link='logit'))
+      coefs = as.numeric(coef(glm_model))
+      step.tuned[j] = exp((target_logit[j]-coefs[1])/coefs[2])
+  }
+  return(step.tuned)
 }

@@ -1,6 +1,6 @@
 library(parallel)
 library(laGP)
-source("../../mv_calib_lagp.R")
+source("../../../mv_calib_lagp.R")
 
 
 # MCMC sim study using the data saved during the point estimate study

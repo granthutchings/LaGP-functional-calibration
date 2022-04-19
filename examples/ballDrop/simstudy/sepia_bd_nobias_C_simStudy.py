@@ -24,5 +24,5 @@ for i in range(len(mvcData)):
     model.do_mcmc(2500,prog=False)
     mvcData[i]['tSamp'] = model.get_samples(nburn=1000)['theta']
     
-with open('mvcDataSimStudy.pkl','wb') as f:\n",
-    pickle.dump(mvcData,f)"
+with open('mvcDataSimStudy.pkl','wb') as f:
+    pickle.dump(mvcData,f)

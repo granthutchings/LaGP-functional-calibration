@@ -801,7 +801,8 @@ mcmc = function(mvcData,tInit,bias=F,nsamples=100,nburn=10,prop.step=rep(.025,mv
   mcmc.time = ptm-proc.time()
   return(list(t.samp=t.store[(nburn+1):nsamples,],ssq.samp=ssq.store[nburn+1:nsamples],
               acpt.ratio=accept/nsamples,
-              time=mcmc.time))
+              time=mcmc.time,
+              prop.step=prop.step))
 }
 
 tune_step_sizes = function(mvcData,nburn,nlevels,target_acc=NULL){

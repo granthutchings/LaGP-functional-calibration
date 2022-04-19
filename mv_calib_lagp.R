@@ -768,6 +768,7 @@ mcmc = function(mvcData,tInit,bias=F,nsamples=100,nburn=10,prop.step=rep(.025,mv
   t = tInit
   ssq = ll_mcmc(t)$ssq
   llProp = list()
+  pT = mvcData$XTdata$pT
   accept = matrix(0,nrow=1,ncol=pT)
   t.store = matrix(nrow=nsamples,ncol=mvcData$XTdata$pT);t.store[1,] = t
   ssq.store = numeric(nsamples);ssq.store[1] = ssq

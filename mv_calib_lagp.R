@@ -627,7 +627,7 @@ negll = function(theta,mvcData,lite=T,bias=T,sample=T){
     eyenY = eye(nY)
     Bhat = BDtBDinv%*%tBD%*%yDisc
     
-    SigBhat = lapply(1:n, function(i) as.matrix(diag(c(eta$wVar[,i],delta$wVar[,i])) + ssq.hat*BDtBDinv))
+    SigBhat = lapply(1:n, function(i) as.matrix(diag(c(eta$wVar[,i],delta$wVar[,i]),nrow=length(c(eta$wVar[,i],delta$wVar[,i]))) + ssq.hat*BDtBDinv))
     l_beta_hat = sapply(1:n, function(i) dmvnorm(x=as.numeric(Bhat[,i]),sigma = SigBhat[[i]], log = T))
     ll = sapply(1:n, function(i) -.5*((nY-rankBD)*log(2*pi*ssq.hat) + ldetBDtBD +
                                                   lambda*t(yDisc[,i])%*%(eyenY-BD%*%BDtBDinv%*%tBD)%*%yDisc[,i]) + 
@@ -806,7 +806,9 @@ mcmc = function(mvcData,tInit,bias=F,nsamples=100,nburn=10,prop.step=rep(.025,mv
 }
 
 tune_step_sizes = function(mvcData,nburn,nlevels,target_acc=NULL){
-  # t.default = .5
+  pT = mvcData$XTdata$pT
+  
+  # These are the step sizes SEPIA uses, but they seem to result is too small steps for ball drop
   # step.default = .2
   # step.sizes = matrix(nrow=nlevels,ncol=pT)
   # ex = seq(-(nlevels - 1)/2, (nlevels - 1)/2, length.out=nlevels)
@@ -820,7 +822,7 @@ tune_step_sizes = function(mvcData,nburn,nlevels,target_acc=NULL){
   #     step.sizes[i,j] = step.default * base^ex[i]
   #   }
   # }
-  pT = mvcData$XTdata$pT
+  # Instead, I'll start the sequence at .01
   step.sizes = matrix(logseq(.01,2,n=nlevels),nrow=nlevels,ncol=pT,byrow = F)
   
   acc = matrix(nrow=nlevels,ncol=pT)

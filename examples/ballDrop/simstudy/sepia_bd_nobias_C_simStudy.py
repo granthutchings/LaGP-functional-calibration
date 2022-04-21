@@ -3,8 +3,11 @@ import numpy as np
 from sepia.SepiaModel import SepiaModel
 from sepia.SepiaData import SepiaData
 
-with open('mvcDataSimStudy.pkl','rb') as f:
+with open('mvcDataSimStudy_2.pkl','rb') as f:
     mvcData = pickle.load(f)
+with open('tStar.pkl','rb') as f:
+    tStar = pickle.load(f)
+
 
 for i in range(len(mvcData)):
     if i%100==0:
@@ -23,6 +26,6 @@ for i in range(len(mvcData)):
     model.tune_step_sizes(50, 20,prog=False,verbose=False)
     model.do_mcmc(2500,prog=False)
     mvcData[i]['tSamp'] = model.get_samples(nburn=1000)['theta']
-    
-with open('mvcDataSimStudy.pkl','wb') as f:
+
+with open('mvcDataSimStudy_2.pkl','wb') as f:
     pickle.dump(mvcData,f)

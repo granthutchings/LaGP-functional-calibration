@@ -42,7 +42,7 @@ w_to_y = function(w,B,mean=NULL,sd=NULL){
   }
   return(Y)
 }
-mv_eta_predict = function(theta,XpredOrig,mvcData){
+mv_eta_predict = function(theta,XpredOrig,mvcData,start=6,end=50){
   
   nPC = nrow(mvcData$simBasis$Vt)
   # transform and scale Xpred
@@ -51,7 +51,9 @@ mv_eta_predict = function(theta,XpredOrig,mvcData){
   eta = aGPsep_SC_mv(X=XpredSC$XTsim,
                        Z=lapply(1:nPC,function(i) mvcData$simBasis$Vt[i,]),
                        XX=lapply(1:nPC,function(i) cbind(XpredSC$Xobs[[i]],XpredSC$Tobs[[i]])),
-                       returnYmean = F)
+                       returnYmean = F,
+                     start=start,
+                     end=end)
   return(eta)
 }
 
@@ -67,10 +69,10 @@ mv_delta_predict = function(XpredOrig,calib,mvcData){
   }
   return(list(vMean=vMean,vVar=vVar))
 }
-ypred_mle = function(XpredOrig,mvcData,calib,nsamples=1,support='obs',bias=F,emOnly=F){
+ypred_mle = function(XpredOrig,mvcData,calib,nsamples=1,support='obs',bias=F,emOnly=F,start=6,end=50){
   
   # emulator predictions
-  eta = mv_eta_predict(calib$theta.hat.orig,XpredOrig,mvcData)
+  eta = mv_eta_predict(calib$theta.hat.orig,XpredOrig,mvcData,start=start,end=end)
   
   if(support=='obs'){
     B = mvcData$obsBasis$B
@@ -527,7 +529,7 @@ sc_inputs = function(X,ls){
   return(sweep(X, 2, sqrt(ls), FUN = '/'))
 }
 
-negll = function(theta,mvcData,lite=T,bias=T,sample=T){
+negll = function(theta,mvcData,lite=T,bias=T,sample=T,start=6,end=50){
   nPC = nrow(mvcData$obsBasis$Vt)
   n = nrow(mvcData$SCinputs$Xobs[[1]])
   nY = nrow(mvcData$Ydata$obs$orig)
@@ -549,7 +551,9 @@ negll = function(theta,mvcData,lite=T,bias=T,sample=T){
   eta = aGPsep_SC_mv(X=mvcData$SCinputs$XTsim,
                      Z=lapply(1:nPC,function(j) mvcData$simBasis$Vt[j,]),
                      XX=Xpred,
-                     Bobs = mvcData$obsBasis$B)
+                     Bobs = mvcData$obsBasis$B,
+                     start=start,
+                     end=end)
   
   if(sample){
     eta$wSamp = rmvnorm(1,as.numeric(eta$wMean),diag(as.numeric(eta$wVar)))
@@ -698,7 +702,7 @@ mv.calib = function(mvcData,init,nrestarts=1,bias=F,sample=T,optimize=T,
   return(return)
 }
 
-mcmc = function(mvcData,tInit,bias=F,nsamples=100,nburn=10,prop.step=rep(.025,mvcData$XTdata$pT),verbose=F){
+mcmc = function(mvcData,tInit,bias=F,nsamples=100,nburn=10,prop.step=rep(.025,mvcData$XTdata$pT),verbose=F,start=6,end=50){
   ll_mcmc = function(theta){
     nPC = nrow(mvcData$obsBasis$Vt)
     n = nrow(mvcData$SCinputs$Xobs[[1]])
@@ -721,7 +725,9 @@ mcmc = function(mvcData,tInit,bias=F,nsamples=100,nburn=10,prop.step=rep(.025,mv
     eta = aGPsep_SC_mv(X=mvcData$SCinputs$XTsim,
                        Z=lapply(1:nPC,function(j) mvcData$simBasis$Vt[j,]),
                        XX=Xpred,
-                       Bobs = mvcData$obsBasis$B)
+                       Bobs = mvcData$obsBasis$B,
+                       start=start,
+                       end=end)
     eta$wSamp = rmvnorm(1,as.numeric(eta$wMean),diag(as.numeric(eta$wVar)))
     dim(eta$wSamp) = dim(eta$wMean)
     
@@ -799,7 +805,7 @@ mcmc = function(mvcData,tInit,bias=F,nsamples=100,nburn=10,prop.step=rep(.025,mv
     ssq.store[i] = ssq
   }
   mcmc.time = ptm-proc.time()
-  return(list(t.samp=t.store[(nburn+1):nsamples,],ssq.samp=ssq.store[nburn+1:nsamples],
+  return(list(t.samp=t.store[(nburn+1):nsamples,],ssq.samp=ssq.store[(nburn+1):nsamples],
               acpt.ratio=accept/nsamples,
               time=mcmc.time,
               prop.step=prop.step))

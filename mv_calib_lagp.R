@@ -62,11 +62,14 @@ w_to_y = function(w,B,mean=NULL,sd=NULL){
   }
   return(Y)
 }
-mv_eta_predict = function(theta,XpredOrig,mvcData,start=6,end=50){
+mv_eta_predict = function(theta,XpredOrig,mvcData,start=6,end=50,sample=F){
   
   nPC = nrow(mvcData$simBasis$Vt)
   # transform and scale Xpred
-  Xpred = transform_xt(mvcData$XTdata$sim$X$orig,mvcData$XTdata$sim$T$orig,XpredOrig,Tobs=matrix(rep(theta,nrow(XpredOrig)),nrow=nrow(XpredOrig),byrow=T))
+  Xpred = transform_xt(mvcData$XTdata$sim$X$orig,
+                       mvcData$XTdata$sim$T$orig,
+                       XpredOrig,
+                       Tobs=matrix(rep(theta,nrow(XpredOrig)),nrow=nrow(XpredOrig),byrow=T))
   XpredSC = get_SC_inputs(mvcData$estLS,Xpred,nPC)
   eta = aGPsep_SC_mv(X=XpredSC$XTsim,
                        Z=lapply(1:nPC,function(i) mvcData$simBasis$Vt[i,]),
@@ -74,6 +77,9 @@ mv_eta_predict = function(theta,XpredOrig,mvcData,start=6,end=50){
                        returnYmean = F,
                      start=start,
                      end=end)
+  if(sample){
+    eta$wSamp = matrix(rmvnorm(1,as.numeric(eta$wMean),diag(as.numeric(eta$wVar))),ncol=nPC,byrow=T)
+  }
   return(eta)
 }
 
@@ -89,10 +95,7 @@ mv_delta_predict = function(XpredOrig,calib,mvcData){
   }
   return(list(vMean=vMean,vVar=vVar))
 }
-ypred_mle = function(XpredOrig,mvcData,calib,nsamples=1,support='obs',emOnly=F,start=6,end=50){
-  
-  # emulator predictions
-  eta = mv_eta_predict(calib$theta.hat.orig,XpredOrig,mvcData,start=start,end=end)
+ypred_mle = function(XpredOrig,mvcData,theta,ssq,nsamples=1,support='obs',emOnly=F,start=6,end=50){
   
   if(support=='obs'){
     B = mvcData$obsBasis$B
@@ -108,13 +111,16 @@ ypred_mle = function(XpredOrig,mvcData,calib,nsamples=1,support='obs',emOnly=F,s
     nY = nrow(mvcData$Ydata$sim$orig)
   }
   n = nrow(XpredOrig)
+  
+  # emulator predictions
+  eta = mv_eta_predict(theta,XpredOrig,mvcData,start=start,end=end,sample=F)
 
   if(!mvcData$bias){
     # unbiased prediction
     ySamp = array(dim=c(nY,nsamples,n))
     for(i in 1:n){
       ySamp[,,i] = t(mvtnorm::rmvnorm(nsamples,mean=B%*%eta$wMean[,i,drop=F],
-                                      sigma = calib$ssq.hat*eye(nY) + B%*%diag(eta$wVar[,i])%*%t(B))) * 
+                                      sigma = ssq*eye(nY) + B%*%diag(eta$wVar[,i])%*%t(B))) * 
         ysd + ym
     }
     yMean = apply(ySamp,c(1,3),mean)
@@ -131,8 +137,8 @@ ypred_mle = function(XpredOrig,mvcData,calib,nsamples=1,support='obs',emOnly=F,s
                                        sigma = B%*%diag(eta$wVar[,j])%*%t(B))) *
         ysd + ym
       deltaSamp[,,j] = t(mvtnorm::rmvnorm(nsamples,mean=D%*%delta$vMean[,j,drop=F],
-                                         sigma = D%*%diag(delta$vVar[,j],nrow=length(delta$vVar[,j]))%*%t(D) *
-                                           calib$ssq.hat*eye(nY) )) * ysd
+                                         sigma = D%*%diag(delta$vVar[,j],nrow=length(delta$vVar[,j]))%*%t(D) +
+                                           ssq*eye(nY) )) * ysd
     }
 
     ySamp = etaSamp + deltaSamp
@@ -145,7 +151,7 @@ ypred_mle = function(XpredOrig,mvcData,calib,nsamples=1,support='obs',emOnly=F,s
                 etaMean=etaMean,deltaMean=deltaMean))
   }
 }
-ypred_mcmc = function(XpredOrig,mvcData,tsamp,support='obs',returnSamples=F){
+ypred_mcmc = function(XpredOrig,mvcData,tsamp,ssqsamp,support='obs',returnSamples=F,start=6,end=50){
   if(support=='obs'){
     B = mvcData$obsBasis$B
     D = mvcData$obsBasis$D
@@ -159,19 +165,19 @@ ypred_mcmc = function(XpredOrig,mvcData,tsamp,support='obs',returnSamples=F){
     ysd = mvcData$Ydata$sim$sd
     nY = nrow(mvcData$Ydata$sim$orig)
   }
- 
   ysamp = array(0,dim=c(nrow(tsamp),nY,nrow(XpredOrig)))
   for(i in 1:nrow(tsamp)){
-    tmp = mv.calib(mvcData,tsamp[i,],sample=T,optimize=F)
+    eta = mv_eta_predict(tsamp[i,],XpredOrig,mvcData,sample=T,start=start,end=end)
     if(mvcData$bias){
+      delta = mv_delta_predict()
       for(j in 1:length(tmp$delta$GPs)){
         deleteGPsep(tmp$delta$GPs[[j]])
       }
       mu = B%*%tmp$eta$wSamp + D%*%tmp$delta$wSamp
     } else{
-      mu = B%*%tmp$eta$wSamp
+      mu = B%*%t(eta$wSamp)
     }
-    sigma = tmp$ssq.hat*eye(nY)
+    sigma = ssqsamp[i]*eye(nY)
     for(j in 1:nrow(XpredOrig)){
         ysamp[i,,j] = rmvnorm(1,mean=mu[,j],sigma=sigma) * ysd + ym
     }

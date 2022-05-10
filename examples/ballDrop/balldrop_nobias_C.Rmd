@@ -13,6 +13,7 @@ knitr::opts_knit$set(root.dir = "~/Desktop/laGP Project/examples/ballDrop")
 library(reticulate)
 library(parallel)
 library(crs)
+library(lhs)
 source("../../mv_calib_lagp.R")
 ```
 
@@ -25,7 +26,7 @@ During this tutorial we will detail how to do emulation, calibration, and predic
 ```{r , echo=FALSE}
 C_true = .1
 g_true = 9.8
-sd_true = 0.1 # sd of observation error
+sd_true = 0.1 # sd of observation error - turns our this is very close to 5% of the variance of the sims at dist=5m, .15 is ~10%
 # try making up a function where C,g have no interplay (additive)
 t_at_h = function(C,h,R,g){
   return(acosh(exp(C*h/R))/sqrt(C*g/R))
@@ -34,16 +35,24 @@ t_at_h = function(C,h,R,g){
 pX = 1
 pT = 1
 n = 5; reps = 1
-m = 25
-nPC = 2
+m = 578
 
 # sim data
 set.seed(11)
-XTsim = tgp::lhs(m,matrix(c(.025,.3, # cover range of Xobs
-                            C_true-.05,C_true+.05),
-                          nrow=pX+pT,ncol=2,byrow = T)) # cover g_true
-Xsim=as.matrix(XTsim[,1])
-Tsim=as.matrix(XTsim[,2])
+# XTsim = tgp::lhs(m,matrix(c(.025,.3, # cover range of Xobs
+#                             C_true-.05,C_true+.05),
+#                           nrow=pX+pT,ncol=2,byrow = T)) # cover g_true
+# Xsim=as.matrix(XTsim[,1])
+# Tsim=as.matrix(XTsim[,2])
+# possible m = 2q^2 for prime q
+# m = 2*primes(25)^2
+XTsim = create_oalhs(m,pT+pX,T,F)
+dist = sum(dist(XTsim,upper=T)^(-2))
+Xrange = c(.025,.3)
+Trange = c(C_true-.05,C_true+.05)
+Xsim=as.matrix(XTsim[,1]); Xsim = Xsim * (Xrange[2]-Xrange[1]) + Xrange[1]
+Tsim=as.matrix(XTsim[,2]); Tsim = Tsim * (Trange[2]-Trange[1]) + Trange[1]
+
 YindSim = as.matrix(seq(1,25,1))
 Ysim = matrix(nrow=length(YindSim),ncol=m)
 for(i in 1:m){
@@ -81,15 +90,16 @@ Ydata = transform_y(Ysim,YindSim,Yobs,YindObs,center = T,scale = T, scaletype='s
 ```
 
 ```{r data vis, echo=FALSE}
-matplot(YindSim,Ydata$sim$orig,type='l',col='orange',xlab='distance (m)',ylab='time (s)')
+par(mfrow=c(1,2),mar=c(4,4,4,.3))
+matplot(YindSim,Ydata$sim$orig,type='l',col='orange',xlab='distance (m)',ylab='time (s)',main='Original Scale')
 matplot(YindObs,Ydata$obs$orig,pch=1,add=T,col='black')
 matplot(YindObs,Ydata$obs$orig,type='l',lty=1,add=T,col='black')
-legend('topleft',inset=c(.05,.05),legend=c('simulations','field observations'),lty=1,col=c('orange','black'))
+legend('topleft',inset=c(.05,.05),legend=c('simulations','field obs.'),lty=1,col=c('orange','black'))
 
-matplot(YindSim,Ydata$sim$trans,type='l',col='orange',xlab='distance (m)',ylab='time (s)')
+matplot(YindSim,Ydata$sim$trans,type='l',col='orange',xlab='distance (m)',ylab='time (s)',main='Standardized Scale')
 matplot(YindObs,Ydata$obs$trans,pch=1,add=T,col='black')
 matplot(YindObs,Ydata$obs$trans,type='l',lty=1,add=T,col='black')
-legend('topleft',inset=c(.05,.05),legend=c('simulations','field observations'),lty=1,col=c('orange','black'))
+legend('topleft',inset=c(.05,.05),legend=c('simulations','field obs.'),lty=1,col=c('orange','black'))
 ```
 
 # Step 1: get basis
@@ -97,7 +107,7 @@ legend('topleft',inset=c(.05,.05),legend=c('simulations','field observations'),l
 Next we decompose our data using an orthogonal basis decomposition, namely the singular value decomposition. We first create a basis for our simulations using the function `get_basis()` which accepts our simulator responses that have already been scaled by `transform_xt()` as well as `nPC`, the number of basis vectors to use. If you do not know a-priori how many basis vectors you would like to use, the parameter $\texttt{pctVar}\in(0,1)$ can be specified indicating that the decomposition should retain enough basis vectors to account for a certain percentage of the variability in the data. We then generate the basis for the field observations, using the basis for the simulations with the function `get_obs_basis`. At this point you will recognize all the inputs to this function except for `sigY`. This value defaults to one, and has no effect if not specified. If one has an idea of the error variance for the field observations this can be passed in here and will be used when producing basis vectors.
 
 ```{r}
-simBasis = get_basis(Ydata$sim$trans,nPC)
+simBasis = get_basis(Ydata$sim$trans,pctVar = .99)
 obsBasis = get_obs_basis(simBasis,Ydata$obs$trans,YindSim,YindObs)
 #obsBasis$B%*%obsBasis$Vt - Ydata$obs$trans
 ```
@@ -114,7 +124,7 @@ Next we will globally estimate length-scale parameters for the laGP models using
 
 ```{r }
 estLS = mv_lengthscales(XTdata,simBasis$Vt,g=1e-7)
-SCinputs = get_SC_inputs(estLS,XTdata,nPC)
+SCinputs = get_SC_inputs(estLS,XTdata,simBasis$nPC)
 ```
 
 ```{r}
@@ -125,8 +135,9 @@ mvcData = list(XTdata=XTdata,
                estLS=estLS,
                SCinputs=SCinputs,
                YindObs=YindObs,
-               YindSim=YindSim)
-py_save_object(mvcData,'bd_nobias_C_data.pkl')
+               YindSim=YindSim,
+               bias=F)
+py_save_object(mvcData,'data/bd_nobias_C_data.pkl')
 ```
 
 # Step 3: calibrate over grid of t values
@@ -134,11 +145,10 @@ py_save_object(mvcData,'bd_nobias_C_data.pkl')
 Now we can calibrate over a range of possible $C$ values. First suppose we are only interested in a point estimate of $t^*$. In this case, we begin by evaluating the likelihood over a sparse grid of candidate values using the function $\texttt{calib.init}$ with $\texttt{tCalib}$ a matrix of candidates. Here we specify $\texttt{sample=F}$ indicating that we will use the emulator mean rather than sampling from the emulator. This is important as sampling from the emulator will introduce uncertainty in our estimate of $t^*$. We plot the results of the sparse grid search and see that we have a very well behaved likelihood. By passing the sorted list of likelihood evaluations in $\texttt{init}$ to the calibration function $\texttt{mv.calib}$ we initialize our optimization algorithm at good starting locations.
 
 ```{r calibration}
-nT = 100
-tCalib = matrix(seq(.01,.99,length.out=nT))
-init = calib.init(tCalib,mvcData,bias=F,sample=F)
+tCalib = matrix(seq(.1,.9,.1))
+init = calib.init(tCalib,mvcData,sample=F,end=50)
 plot(init$theta1,init$ll,ylab='ll',xlab='t')
-calib = mv.calib(mvcData,init,nrestarts=10,optimize=T,bias=F,sample=F)
+calib = mv.calib(mvcData,init,nrestarts=3,optimize=T,sample=F,end=50)
 cat('t*:', calib$theta.hat,'\n')
 cat('estimated error variance:', calib$ssq.hat.orig,'\n')
 ```
@@ -146,12 +156,45 @@ cat('estimated error variance:', calib$ssq.hat.orig,'\n')
 The more likely scenario is that we are interested in uncertainty. In this case we use a MH-MCMC algorithm to sample from the posterior distribution of $t^*$.
 
 ```{r mcmc, echo=F}
-# compare this to mcmc dist
-mcmc.out = mcmc(mvcData,tInit=init$theta1[which.max(init$ll)],bias=F,nsamples=10000,nburn=1000,prop.var = .08)
-plot(mcmc.out$t.samp,type='l')
-plot(mcmc.out$ssq.samp,type='l')
-hist(mcmc.out$t.samp);abline(v=mean(mcmc.out$t.samp),col='red')
-hist(mcmc.out$ssq.samp);abline(v=mean(mcmc.out$ssq.samp),col='red')
+end = c(25,50,100)
+mcmc.out = vector(mode='list',length=3)
+for(i in 1:length(end)){
+  ptm = proc.time()
+  prop.step = tune_step_sizes(mvcData,50,20,end=end[i])
+  mcmc.out[[i]] = mcmc(mvcData,tInit=init$theta1[which.max(init$ll)],nsamples=10000,nburn=0,prop.step=prop.step,verbose = T,end=end[i])
+  mcmc.out[[i]]$time = ptm-proc.time()
+}
+save(mcmc.out,file='data/mcmc_out_578.RData')
+
+#load('data/mcmc_out_242.RData')
+# prop.step = tune_step_sizes(mvcData,50,20,end=50)
+# mcmc.out = mcmc(mvcData,tInit=init$theta1[which.max(init$ll)],nsamples=10000,nburn=0,prop.step=prop.step,verbose = T,end=50)
+# save(mcmc.out,file='data/mcmc_out_50.Rdata')
+load('data/mcmc_out_578.RData')
+
+par(mfrow=c(1,2),mar=c(4,4,4,.3))
+for(i in 2:2){
+  hist(mcmc.out[[i]]$t.samp,main='',xlab='t*');abline(v=.5,col='red');abline(v=calib$theta.hat,col='blue')
+  text(.45,1700,paste0('mean: ',round(mean(mcmc.out[[i]]$t.samp),3),'\n  sd: ',round(sd(mcmc.out[[i]]$t.samp),4),'\n  mle: ',
+                       round(calib$theta.hat,3),'\ntrue: 0.5'))
+  plot(mcmc.out[[i]]$t.samp,type='l',ylab='t*',xlab='MCMC iteration')
+  #hist(mcmc.out$ssq.samp);abline(v=mean(mcmc.out$ssq.samp),col='red')
+}
+# sepia comparison
+sepia_mcmc = drop(py_load_object('data/bd_nobias_sepia_578_samples.pkl'))
+par(mfrow=c(1,2),mar=c(4,4,4,.3))
+hist(sepia_mcmc,main='',xlab='t*');abline(v=.5,col='red')
+  text(.45,1700,paste0('mean: ',round(mean(sepia_mcmc),3),'\n  sd: ',round(sd(sepia_mcmc),4),'\ntrue: 0.5'))
+  plot(sepia_mcmc,type='l',ylab='t*',xlab='MCMC iteration')
+
+par(mfrow=c(1,1))
+rmse = c(sqrt(mean((mcmc.out[[1]]$t.samp-.5)^2)),
+         sqrt(mean((mcmc.out[[2]]$t.samp-.5)^2)),
+         sqrt(mean((mcmc.out[[3]]$t.samp-.5)^2)))
+boxplot(mcmc.out[[1]]$t.samp,mcmc.out[[2]]$t.samp,mcmc.out[[3]]$t.samp,names=c('25','50','100'),xlab='laGP neighborhood size',ylab='t*',ylim=c(.42,.55));abline(h=.5,col='red')
+text(.8,.542,paste0('RMSE:    ',round(rmse[1],4)))
+text(2,.542,paste0('',round(rmse[2],4)))
+text(3,.542,paste0('',round(rmse[3],4)))
 ```
 
 # Prediction at observed locations
@@ -161,14 +204,14 @@ We now show how to predict from our emulator at both observed and new input sett
 Prediction using mcmc results is done with the function `ypred_mcmc()` passing in a matrix of samples of $t^*$ to use for prediction. We also specify that we would like to predict on the full support of heights from $1m$ to $25m$ by setting $\texttt{support='sim'}$. $\texttt{support='obs'}$ will return predictions only at the points $\texttt{YindObs}$.
 
 ```{r, echo=F}
-support = 'sim'
+support = 'obs'
 if(support=='obs'){
   predInd = YindObs[,1]
 } else if(support=='sim'){
   predInd = YindSim[,1]
 }
-tsamp = matrix(sample(mcmc.out$t.samp,1000))
-yPred = ypred_mcmc(mvcData$XTdata$obs$X$orig[1:n,,drop=F],mvcData,tsamp,support=support,bias=F)
+tsamp = matrix(sample(mcmc.out[[2]]$t.samp,100))
+yPred = ypred_mcmc(mvcData$XTdata$obs$X$orig[1:n,,drop=F],mvcData,tsamp,support=support,returnSamples=T)
 for(i in 1:n){
   matplot(YindObs[,1],Ydata$obs$orig[,i,drop=F],pch=1,col=i+1,add=ifelse(i==1,F,T),ylim=c(0,12),
           xlab='height',ylab='time',main='MCMC predictions',xlim=c(0,25))
@@ -189,7 +232,7 @@ if(support=='obs'){
 } else if(support=='sim'){
   predInd = YindSim[,1]
 }
-yPred = ypred_mle(Xobs[1:n,,drop=F],mvcData,calib,1000,bias=F,support=support)
+yPred = ypred_mle(Xobs[1:n,,drop=F],mvcData,calib,1000,support=support)
 obs_ids = mclapply(1:n, function(i) seq(i,dim(Ydata$obs$orig)[2],n))
 obs_means = mclapply(1:n, function(i) apply(Ydata$obs$orig[,obs_ids[[i]],drop=F],1,mean))
 for(i in 1:n){
@@ -223,21 +266,22 @@ matplot(YindObs,YobsNew,col='green',type='b',lty=1,pch=1,add=T)
 XTdataNew = transform_xt(Xsim,Tsim,XobsNew)
 YdataNew = transform_y(Ysim,YindSim,YobsNew,YindObs,center = T,scale = T,scaletype = 'scalar')
 obsBasisNew = get_obs_basis(simBasis,YdataNew$obs$trans,YindSim,YindObs)
-SCinputsNew = get_SC_inputs(estLS,XTdataNew,nPC)
+SCinputsNew = get_SC_inputs(estLS,XTdataNew,nPC = mvcData$simBasis$nPC)
 
 mvcDataNew = list(XTdata=XTdataNew,
                Ydata=YdataNew,
                simBasis=simBasis,
                obsBasis=obsBasisNew,
                estLS=estLS,
-               SCinputs=SCinputsNew)
-py_save_object(mvcDataNew,'bd_nobias_oos_C.pkl')
+               SCinputs=SCinputsNew,
+               bias=F)
+py_save_object(mvcDataNew,'data/bd_nobias_oos_C.pkl')
 
 # MCMC
-yPredMCMC = ypred_mcmc(XobsNew,mvcDataNew,tsamp,support=support,bias=F)
+yPredMCMC = ypred_mcmc(XobsNew,mvcDataNew,tsamp,support=support)
 
 # Point Estimate
-yPredPoint = ypred_mle(XobsNew,mvcDataNew,calib,1000,support=support,bias=F)
+yPredPoint = ypred_mle(XobsNew,mvcDataNew,calib,1000,support=support)
 
 # Compare
 par(mfrow=c(2,2),mar=c(4,4,0,0))

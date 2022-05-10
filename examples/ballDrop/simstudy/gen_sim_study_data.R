@@ -1,10 +1,14 @@
 t_at_h = function(C,h,R,g){
   return(acosh(exp(C*h/R))/sqrt(C*g/R))
 }
+setwd('~/Desktop/laGP Project/examples/ballDrop/')
 source("../../mv_calib_lagp.R")
-load('simstudy/mvcDataSimStudy.RData')
+load('simstudy/data/mvcDataSimStudy.RData')
+
+m = 242
+
 for(i in 1:1000){
-  m = 578
+  cat(i,' ')
   XTsim = create_oalhs(m,mvcDataSimStudy[[i]]$XTdata$pT+mvcDataSimStudy[[i]]$XTdata$pX,T,F)
   Xrange = c(.025,.3)
   Trange = c(.1-.05,.1+.05)
@@ -26,5 +30,5 @@ for(i in 1:1000){
   mvcDataSimStudy[[i]]$bias = F
   mvcDataSimStudy[[i]]$design_score = sum(dist(XTsim,upper=T)^(-2))
 }
-save(mvcDataSimStudy,file='simstudy/mvcDataSimStudy_578.RData')
-py_save_object(mvcDataSimStudy,file='simstudy/mvcDataSimStudy_578.pkl')
+save(mvcDataSimStudy,file=paste0('simstudy/mvcDataSimStudy_',m,'.RData'))
+py_save_object(mvcDataSimStudy,file=paste0('simstudy/mvcDataSimStudy_',m,'.pkl'))

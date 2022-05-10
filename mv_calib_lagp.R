@@ -14,6 +14,26 @@ inv.logit = function(x){
   exp(x)/(1+exp(x))
 }
 
+# ypred_samp nsamp x ny x n
+energy_score = function(ysamp,y){
+  nsamp = dim(ysamp)[1]
+  n = dim(ysamp)[3]
+  
+  get_es = function(i){
+    diff = t(t(ysamp[,,i])-y[,i])
+    diff_true = mean(apply(diff,1,norm,type='2')) # mean over samples of norm of difference
+    diff_mcmc = (1/(2*nsamp^2))*sum(sapply(1:nsamp, function(k) 
+      sum(sapply(1:nsamp, function(j)
+        norm(ysamp[k,,i]-ysamp[j,,i],type='2')))))
+    return(diff_true - diff_mcmc)
+  }
+    
+  es = unlist(
+    mclapply(1:n, function(i) get_es(i))
+  )
+  return(es)
+}
+
 plot_wz_pairs = function(w,z,legend=T){
   nPC = nrow(w)
   m = ncol(w)
@@ -69,7 +89,7 @@ mv_delta_predict = function(XpredOrig,calib,mvcData){
   }
   return(list(vMean=vMean,vVar=vVar))
 }
-ypred_mle = function(XpredOrig,mvcData,calib,nsamples=1,support='obs',bias=F,emOnly=F,start=6,end=50){
+ypred_mle = function(XpredOrig,mvcData,calib,nsamples=1,support='obs',emOnly=F,start=6,end=50){
   
   # emulator predictions
   eta = mv_eta_predict(calib$theta.hat.orig,XpredOrig,mvcData,start=start,end=end)
@@ -89,7 +109,7 @@ ypred_mle = function(XpredOrig,mvcData,calib,nsamples=1,support='obs',bias=F,emO
   }
   n = nrow(XpredOrig)
 
-  if(!bias){
+  if(!mvcData$bias){
     # unbiased prediction
     ySamp = array(dim=c(nY,nsamples,n))
     for(i in 1:n){
@@ -125,7 +145,7 @@ ypred_mle = function(XpredOrig,mvcData,calib,nsamples=1,support='obs',bias=F,emO
                 etaMean=etaMean,deltaMean=deltaMean))
   }
 }
-ypred_mcmc = function(XpredOrig,mvcData,tsamp,support='obs',bias=F){
+ypred_mcmc = function(XpredOrig,mvcData,tsamp,support='obs',returnSamples=F){
   if(support=='obs'){
     B = mvcData$obsBasis$B
     D = mvcData$obsBasis$D
@@ -142,8 +162,8 @@ ypred_mcmc = function(XpredOrig,mvcData,tsamp,support='obs',bias=F){
  
   ysamp = array(0,dim=c(nrow(tsamp),nY,nrow(XpredOrig)))
   for(i in 1:nrow(tsamp)){
-    tmp = mv.calib(mvcData,tsamp[i,],bias=bias,sample=T,optimize=F)
-    if(bias){
+    tmp = mv.calib(mvcData,tsamp[i,],sample=T,optimize=F)
+    if(mvcData$bias){
       for(j in 1:length(tmp$delta$GPs)){
         deleteGPsep(tmp$delta$GPs[[j]])
       }
@@ -159,7 +179,11 @@ ypred_mcmc = function(XpredOrig,mvcData,tsamp,support='obs',bias=F){
   mean = apply(ysamp,2:3,mean)
   var = apply(ysamp,2:3,var)
   conf.int = apply(ysamp,2:3,quantile,c(.025,.975))
-  return(list(mean=mean,var=var,conf.int=conf.int))
+  returns = list(mean=mean,var=var,conf.int=conf.int)
+  if(returnSamples){
+    returns$ysamp = ysamp
+  }
+  return(returns)
 }
 # FUNCTION: multivariate aGPsep for use with stretched and compressed inputs only
 {## Parameters:
@@ -651,11 +675,11 @@ negll = function(theta,mvcData,lite=T,bias=T,sample=T,start=6,end=50){
 
 
 
-calib.init = function(tInit,mvcData,bias,sample=F){
+calib.init = function(tInit,mvcData,sample=F,start=6,end=50){
   pT = mvcData$XTdata$pT
   # tInitOrig = t(t(tInit) * mvcData$XTdata$sim$T$range + mvcData$XTdata$sim$T$min)
 
-  ll = sapply(1:nrow(tInit), function(j) -negll(tInit[j,,drop=F],mvcData,lite=T,bias=bias,sample=sample))
+  ll = sapply(1:nrow(tInit), function(j) -negll(tInit[j,,drop=F],mvcData,lite=T,bias=mvcData$bias,sample=sample,start=start,end=end))
   
   ll_df = as.data.frame(matrix(cbind(ll,as.matrix(tInit)),nrow=length(ll),ncol=pT+1))
   names = c("ll")
@@ -666,9 +690,10 @@ calib.init = function(tInit,mvcData,bias,sample=F){
   return(ll_df)
 }
 
-mv.calib = function(mvcData,init,nrestarts=1,bias=F,sample=T,optimize=T,
+mv.calib = function(mvcData,init,nrestarts=1,sample=T,optimize=T,
                     opts=list("MAX_BB_EVAL" = 1000, "INITIAL_MESH_SIZE" = .1,
-                              "MIN_POLL_SIZE" = "r0.001", "DISPLAY_DEGREE" = 0)){
+                              "MIN_POLL_SIZE" = "r0.001", "DISPLAY_DEGREE" = 0),
+                    start=6,end=50){
 
   if(optimize){
     # nrestarts cannot be greater than our set of initial values
@@ -686,23 +711,25 @@ mv.calib = function(mvcData,init,nrestarts=1,bias=F,sample=T,optimize=T,
                      print.output=F,
                      mvcData = mvcData,
                      lite=T,
-                     bias=bias,
-                     sample=sample)
+                     bias=mvcData$bias,
+                     sample=sample,
+                     start=start,
+                     end=end)
       if(is.null(out) || outi$objective < out$objective) out <- outi
     }
-    return = negll(matrix(out$solution,nrow=1),mvcData,lite=F,bias=bias,sample=sample)
+    return = negll(matrix(out$solution,nrow=1),mvcData,lite=F,bias=mvcData$bias,sample=sample)
     return$snomadr = out
     return$theta.hat = out$solution
     return$theta.hat.orig = out$solution * mvcData$XTdata$sim$T$range + mvcData$XTdata$sim$T$min
   } else{
-    return = negll(init,mvcData,lite=F,bias=bias,sample=sample)
+    return = negll(init,mvcData,lite=F,bias=mvcData$bias,sample=sample,start=start,end=end)
     return$theta.hat = init
     return$theta.hat.orig = init * mvcData$XTdata$sim$T$range + mvcData$XTdata$sim$T$min
   }
   return(return)
 }
 
-mcmc = function(mvcData,tInit,bias=F,nsamples=100,nburn=10,prop.step=rep(.025,mvcData$XTdata$pT),verbose=F,start=6,end=50){
+mcmc = function(mvcData,tInit,nsamples=100,nburn=10,prop.step=rep(.025,mvcData$XTdata$pT),verbose=F,start=6,end=50){
   ll_mcmc = function(theta){
     nPC = nrow(mvcData$obsBasis$Vt)
     n = nrow(mvcData$SCinputs$Xobs[[1]])
@@ -734,7 +761,7 @@ mcmc = function(mvcData,tInit,bias=F,nsamples=100,nburn=10,prop.step=rep(.025,mv
     # residuals
     yDisc = mvcData$Ydata$obs$trans - w_to_y(eta$wSamp,mvcData$obsBasis$B)
     
-    if(bias){
+    if(mvcData$bias){
       delta$basis = get_basis(yDisc,pctVar=.95,B=mvcData$obsBasis$D)
       delta$GPs = vector(mode='list',length=delta$basis$nPC)
       
@@ -811,7 +838,7 @@ mcmc = function(mvcData,tInit,bias=F,nsamples=100,nburn=10,prop.step=rep(.025,mv
               prop.step=prop.step))
 }
 
-tune_step_sizes = function(mvcData,nburn,nlevels,target_acc=NULL){
+tune_step_sizes = function(mvcData,nburn,nlevels,target_acc=NULL,start=6,end=50){
   pT = mvcData$XTdata$pT
   
   # These are the step sizes SEPIA uses, but they seem to result is too small steps for ball drop
@@ -833,7 +860,7 @@ tune_step_sizes = function(mvcData,nburn,nlevels,target_acc=NULL){
   
   acc = matrix(nrow=nlevels,ncol=pT)
   for(i in 1:nlevels){
-    acc[i,] = mcmc(mvcData,tInit = rep(.5,pT),bias=mvcData$bias,nsamples = nburn,prop.step = step.sizes[i,])$acpt.ratio
+    acc[i,] = mcmc(mvcData,tInit = rep(.5,pT),nsamples = nburn,prop.step = step.sizes[i,], start=start, end=end)$acpt.ratio
   }
 
   # Compute GLM for each parameter

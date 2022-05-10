@@ -37,7 +37,7 @@ t_at_h_sim = function(C,h,R,g){
 pX = 1
 pT = 1
 n = 5; reps = 1
-m = 36
+m = 242
 nPC = 2
 
 # sim data
@@ -96,7 +96,7 @@ XTdata = transform_xt(Xsim,Tsim,Xobs,Tobs)
 Ydata = transform_y(Ysim,YindSim,Yobs,YindObs,center = T,scale = T, scaletype = 'scalar')
 
 # step 1: get basis
-simBasis = get_basis(Ydata$sim$trans,nPC)
+simBasis = get_basis(Ydata$sim$trans,pctVar = .99)
 obsBasis = get_obs_basis(simBasis,Ydata$obs$trans,YindSim,YindObs)
 
 # Add linear discrepancy
@@ -110,7 +110,7 @@ obsBasis$D = Dobs
 
 # step 2: get length-scale estimates and stretch + compress input space
 estLS = mv_lengthscales(XTdata,simBasis$Vt,g=1e-7)
-SCinputs = get_SC_inputs(estLS,XTdata,nPC)
+SCinputs = get_SC_inputs(estLS,XTdata,simBasis$nPC)
 
 mvcData = list(XTdata=XTdata,
                Ydata=Ydata,
@@ -119,7 +119,8 @@ mvcData = list(XTdata=XTdata,
                estLS=estLS,
                SCinputs=SCinputs,
                YindObs=YindObs,
-               YindSim=YindSim)
+               YindSim=YindSim,
+               bias=T)
 py_save_object(mvcData,'bd_bias_C_data.pkl')
 ```
 
@@ -134,7 +135,7 @@ nT = 100
 tCalib = matrix(seq(.01,.99,length.out=100))
 init = calib.init(tCalib,mvcData,bias=T,sample=F)
 plot(init$theta1,init$ll,ylab='ll',xlab='t')
-calib = mv.calib(mvcData,init,nrestarts=10,bias=T,sample=F)
+calib = mv.calib(mvcData,init,nrestarts=1,bias=T,sample=F)
 ```
 
 ```{r, echo=F}
@@ -143,13 +144,13 @@ cat('estimated error variance:', calib$ssq.hat.orig,'\n')
 ```
 
 ```{r mcmc, echo=F}
-do.mcmc = F
+do.mcmc = T
 if(do.mcmc){
-  Rprof("Rprof.out")
-  mcmc.out = mcmc(mvcData,tInit=init$theta1[which.max(init$ll)],bias=T,nsamples=10000,nburn=1000,prop.var=.2)
-  Rprof(NULL)
-  summaryRprof("Rprof.out")
-  save(mcmc.out,file='bd_bias_mcmc.RData')
+  ptm = proc.time()
+  prop.step = tune_step_sizes(mvcData,50,20,end=50)
+  mcmc.out = mcmc(mvcData,tInit=init$theta1[which.max(init$ll)],nsamples=10000,nburn=1000,prop.step = prop.step)
+  mcmc_time_50 = ptm - proc.time()
+  save(mcmc.out,mcmc_time_50,file='bd_bias_mcmc.RData')
 } else{
   load('bd_bias_mcmc.RData')
 }

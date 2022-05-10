@@ -1,0 +1,542 @@
+---
+title: "Ball Drop Example, No Bias"
+author: "Grant Hutchings"
+date: "2/23/2022"
+output: pdf_document
+---
+
+```{r setup, echo=F, include=FALSE}
+knitr::opts_knit$set(root.dir = "~/Desktop/laGP Project/examples/ballDrop")
+```
+
+```{r depends, echo=F, include=FALSE}
+library(reticulate)
+library(parallel)
+library(crs)
+library(lhs)
+source("../../mv_calib_lagp.R")
+```
+
+```{r, sim study}
+# point estimate results
+load("~/Desktop/laGP Project/examples/BallDrop/simstudy/data/bd_ub_simulate_pt_est.RData")
+ptEst_AbsErr = AbsErr; rm(AbsErr)
+
+# lagp MCMC results
+load("~/Desktop/laGP Project/examples/BallDrop/simstudy/data/bd_ub_mcmc_simstudy.RData")
+laGP_Err = matrix(nrow=1500,ncol=1000)
+laGP_sd_1 = numeric(1000)
+for(i in 1:1000){
+  laGP_Err[,i] = tStar[i] - mcmc.out[[i]]$t.samp
+  laGP_sd_1[i] = sd(mcmc.out[[i]]$t.samp)
+}
+laGP_RRMSE = sqrt(colMeans(laGP_Err^2)/tStar^2)
+lagp_RMSE_1 = sqrt(colMeans(laGP_Err^2))
+
+# sepia Results
+sepia_sim_results = py_load_object('simstudy/data/mvcDataSimStudy.pkl')
+SepiaErr = matrix(nrow=1500,ncol=1000)
+SepiaAbsErrMean = numeric(1000)
+sepia_sd_1 = numeric(1000)
+for(i in 1:1000){
+  SepiaErr[,i] = sepia_sim_results[[i]]$tStar-sepia_sim_results[[i]]$tSamp
+  SepiaAbsErrMean[i] = abs(sepia_sim_results[[i]]$tStar-mean(sepia_sim_results[[i]]$tSamp))
+  sepia_sd_1[i] = sd(sepia_sim_results[[i]]$tSamp)
+}
+SepiaAbsErr = abs(SepiaErr)
+SepiaMeanAbsErr = colMeans(SepiaAbsErr)
+SepiaRRMSE = sqrt(colMeans(SepiaErr^2)/tStar^2)
+sepia_RMSE_1 = sqrt(colMeans(SepiaErr^2))
+# COMPARE
+
+# Mean of Absolute errors
+par(mfrow=c(1,2))
+plot(tStar,SepiaMeanAbsErr,ylim=c(0,.15))
+plot(tStar,MeanAbsErr,col='red',ylim=c(0,.15))
+plot(density(MeanAbsErr,bw=.004),col='red',ylim=c(0,60),ylab='Gaussian KDE',xlab='Mean Absolute Error',main=''); lines(density(SepiaMeanAbsErr,bw=.004));legend('topright',inset=.05,legend=c('SEPIA','laGP - MCMC'),col=c('black','red'),lty=1)
+
+# RRMSE
+par(mfrow=c(1,2))
+plot(tStar,SepiaRRMSE,ylim=c(0,1.1))
+plot(tStar,laGP_RRMSE,col='red',ylim=c(0,1.1))
+plot(density(laGP_RRMSE,bw=.015),col='red',ylim=c(0,16),ylab='Gaussian KDE',xlab='RRMSE',main=''); lines(density(SepiaRRMSE,bw=.015));legend('topright',inset=.05,legend=c('SEPIA','laGP - MCMC'),col=c('black','red'),lty=1)
+
+# RMSE
+par(mfrow=c(1,2))
+plot(tStar,sepia_RMSE_1,ylim=c(0,.25))
+plot(tStar,lagp_RMSE_1,col='red',ylim=c(0,.25))
+plot(density(lagp_RMSE_1,bw=.005),col='red',ylim=c(0,50),ylab='Gaussian KDE',xlab='RMSE',main=''); lines(density(sepia_RMSE_1,bw=.005));legend('topright',inset=.05,legend=c('SEPIA','laGP - MCMC'),col=c('black','red'),lty=1)
+
+# RMSE plot with color scale by SD of samples
+sepia_rmse_df = data.frame(t=tStar,rmse=sepia_RMSE_1,sd=sepia_sd_1)
+lagp_rmse_df = data.frame(t=tStar,rmse=lagp_RMSE_1,sd=laGP_sd_1)
+g1=ggplot(sepia_rmse_df, aes(x=t, y=rmse))+geom_point(aes(col=sd))+
+  scale_color_gradient2(low='green',mid='yellow',high='red',midpoint=max(lagp_rmse_df$sd)/2,limits=c(0,max(lagp_rmse_df$sd)))+ylim(c(0,.2))
+g2=ggplot(lagp_rmse_df, aes(x=t, y=rmse))+geom_point(aes(col=sd))+
+  scale_color_gradient2(low='green',mid='yellow',high='red',midpoint=max(lagp_rmse_df$sd)/2,limits=c(0,max(lagp_rmse_df$sd)))+ylim(c(0,.2))
+ggpubr::ggarrange(g1, g2, ncol=2, nrow=1, common.legend = TRUE, legend="right")
+
+par(mfrow=c(1,3),mar=c(4,4,4,0.3))
+plot(tStar,sepia_RMSE_1,ylim=c(0.01,.2),yaxt='n',xlab='t*',ylab='RMSE',main='SEPIA');axis(2, at=c(.01,.05,.1,.15,.20), las=2)
+plot(tStar,lagp_RMSE_1,col='darkred',ylim=c(0.01,.2),xlab='t*',yaxt='n',ylab='',main='laGP');axis(2, at=c(.01,.05,.1,.15,.20), las=2)
+boxplot(sepia_RMSE_1,lagp_RMSE_1,names=c('SEPIA','laGP'),yaxt='n',ylim=c(0.01,.2),main='');axis(2, at=c(.01,.05,.1,.15,.20), las=2)
+
+# Absolute Errors of MCMC mean
+par(mfrow=c(1,3))
+plot(tStar,SepiaAbsErrMean,ylim=c(0,.2))
+plot(tStar,AbsErrMean,col='red',ylim=c(0,.2))
+plot(tStar,ptEst_AbsErr,col='blue',ylim=c(0,.2))
+plot(density(AbsErrMean,bw=.005),col='red',ylim=c(0,35),ylab='Gaussian KDE',xlab='Absolute Error',main='');lines(density(ptEst_AbsErr,bw=.005),col='blue');lines(density(SepiaAbsErrMean,bw=.005));legend('topright',inset=.05,legend=c('SEPIA - Post. Mean','laGP - Post. Mean','laGP - Pt. Est.'),col=c('black','red','blue'),lty=1)
+
+# SD of samples - How much more certain is SEPIA?
+boxplot(sepia_sd_1,laGP_sd_1)
+
+```
+
+# Examine some of the best and some of the worst from laGP mcmc
+ 
+We can see that occasionally there is some multimodality in the likelihood, which is causing issues for our model.
+
+```{r, echo=F}
+load('simstudy/data/mvcDataSimStudy.RData')
+tCalib = matrix(seq(.01,.99,length.out=100))
+ids = which(lagp_RMSE_1>.1)
+sepia_RMSE_1[ids] # sepia is having no issues with these, so these are probably situations where the observed data is especially useful for calibration
+par(mfrow=c(2,3))
+for(i in ids){
+  init = calib.init(tCalib,mvcDataSimStudy[[i]],bias=F,sample=F)
+  plot(init$theta1,init$ll,ylab='ll',xlab='t',main=i);abline(v=tStar[i])
+}
+par(mfrow=c(1,3))
+ids = which(lagp_RMSE_1<.015)
+for(i in ids){
+  init = calib.init(tCalib,mvcDataSimStudy[[i]],bias=F,sample=F)
+  plot(init$theta1,init$ll,ylab='ll',xlab='t',main=i);abline(v=tStar[i])
+}
+
+# 223 is a great example of multi-modality, im curious what is causing this. Maybe we can pinpoint the issue.
+i=223
+init = calib.init(tCalib,mvcDataSimStudy[[i]],bias=F,sample=F)
+plot(init$theta1,init$ll,ylab='ll',xlab='t',main=i);abline(v=tStar[i])
+
+# 0. Is 2 PC a bad choice?
+mvcDataTest = mvcDataSimStudy[[223]]
+mvcDataTest$simBasis = get_basis(mvcDataTest$Ydata$sim$trans,pctVar = .99)
+mvcDataTest$obsBasis = get_obs_basis(mvcDataTest$simBasis,mvcDataTest$Ydata$obs$trans,mvcDataTest$YindSim,mvcDataTest$YindObs)
+mvcDataTest$estLS = mv_lengthscales(mvcDataTest$XTdata,mvcDataTest$simBasis$Vt,g=1e-7)
+mvcDataTest$SCinputs = get_SC_inputs(mvcDataTest$estLS,mvcDataTest$XTdata,mvcDataTest$simBasis$nPC)
+init = calib.init(tCalib,mvcDataTest,bias=F,sample=F)
+plot(init$theta1,init$ll,ylab='ll',xlab='t');abline(v=tStar[223])
+# No, 1 PC did'nt fix the problem
+
+# 1. try randomizing over a few different experimental designs, with the same observed data
+#RMSE = numeric(50)
+#load('simstudy/mvcDataSimStudy.RData')
+# ii = 724
+# for(i in 1:50){
+#   mvcDataTest = mvcDataSimStudy[[ii]]
+#   if(i==1){
+#     XTsim = cbind(mvcDataTest$XTdata$sim$X$orig,mvcDataTest$XTdata$sim$T$orig)
+#   } else{
+#     XTsim = dopt.gp(m, Xcand = tgp::lhs(m*10000, matrix(c(.025,.3, # cover range of Xobs
+#                             C_true-.05,C_true+.05),
+#                           nrow=pX+pT,ncol=2,byrow = T)))$XX 
+#   }
+#   Xsim=as.matrix(XTsim[,1])
+#   Tsim=as.matrix(XTsim[,2])
+#   Ysim = matrix(nrow=length(YindSim),ncol=m)
+#   for(j in 1:m){
+#     Ysim[,j] = t_at_h(C=Tsim[j],h=YindSim,R=Xsim[j],g=g_true)
+#   }
+#   mvcDataTest$XTdata = transform_xt(Xsim,Tsim,mvcDataTest$XTdata$obs$X$orig,mvcDataTest$XTdata$obs$T$orig)
+#   mvcDataTest$Ydata = transform_y(Ysim,YindSim,mvcDataTest$Ydata$obs$orig,YindObs,center = T,scale = T, scaletype='scalar')
+#   mvcDataTest$simBasis = get_basis(mvcDataTest$Ydata$sim$trans,pctVar = .99)
+#   mvcDataTest$obsBasis = get_obs_basis(mvcDataTest$simBasis,mvcDataTest$Ydata$obs$trans,YindSim,YindObs)
+#   mvcDataTest$estLS = mv_lengthscales(mvcDataTest$XTdata,mvcDataTest$simBasis$Vt,g=1e-7)
+#   mvcDataTest$SCinputs = get_SC_inputs(mvcDataTest$estLS,mvcDataTest$XTdata,mvcDataTest$simBasis$nPC)
+#   mvcDataTest$bias = F
+#   init = calib.init(tCalib,mvcDataTest,bias=F,sample=F)
+#   #plot(init$theta1,init$ll,ylab='ll',xlab='t',main=i);abline(v=tStar[223])
+#   
+#   prop.step = tune_step_sizes(mvcDataTest,50,20)
+#   mcmc.out = mcmc(mvcDataTest,tInit=.5,bias=F,nsamples=2500,nburn=1000,prop.step=prop.step)
+#   RMSE[i] = sqrt(mean((mcmc.out$t.samp - tStar[ii])^2))
+# }
+
+# par(mfrow=c(1,2),mar=c(4,4,4,.3))
+# load('simstudy/data/RMSE_id223_random_ExpDesign.RData')
+# hist(RMSE,main=paste0('RMSE, t*=',round(tStar[223],4)))
+# abline(v=c(lagp_RMSE_1[223],median(RMSE),median(lagp_RMSE_1)),col=c('darkred','darkblue','black'),lwd=2)
+# #legend('topright',legend=c('bad design','q=.5 over designs','q=.5 over t*'),lty=1,col=c('darkred','darkblue','black'),lwd=2)
+# load('simstudy/data/RMSE_id724_random_ExpDesign.RData')
+# hist(RMSE,main=paste0('RMSE, t*=',round(tStar[724],4)))
+# abline(v=c(lagp_RMSE_1[724],median(RMSE),median(lagp_RMSE_1)),col=c('darkred','darkblue','black'),lwd=2)
+# legend('topright',legend=c('bad design','q=.5 over designs','q=.5 over t*'),lty=1,col=c('darkred','darkblue','black'),lwd=2)
+
+#save(RMSE,file='simstudy/data/RMSE_id724_random_ExpDesign.RData')
+#load('simstudy/RMSE_id223_random_ExpDesign.RData')
+#hist(RMSE,main=paste0('RMSE over random designs for t*=',round(tStar[223],4)));abline(v=lagp_RMSE_1[223],col='red')
+
+# Moral of the story is we should be more careful about our experimental design
+# lets generate new data for the sim study with hopefully better designs
+# for(i in 1:1000){
+#   XTsim = dopt.gp(m, Xcand = tgp::lhs(100000, matrix(c(.025,.3, # cover range of Xobs
+#                             C_true-.05,C_true+.05),
+#                           nrow=pX+pT,ncol=2,byrow = T)))$XX 
+#   Xsim=as.matrix(XTsim[,1])
+#   Tsim=as.matrix(XTsim[,2])
+#   Ysim = matrix(nrow=length(YindSim),ncol=m)
+#   for(j in 1:m){
+#     Ysim[,j] = t_at_h(C=Tsim[j],h=YindSim,R=Xsim[j],g=g_true)
+#   }
+#   mvcDataSimStudy[[i]]$XTdata = transform_xt(Xsim,Tsim,mvcDataSimStudy[[i]]$XTdata$obs$X$orig,mvcDataSimStudy[[i]]$XTdata$obs$T$orig)
+#   mvcDataSimStudy[[i]]$Ydata = transform_y(Ysim,YindSim,mvcDataSimStudy[[i]]$Ydata$obs$orig,YindObs,center = T,scale = T, scaletype='scalar')
+#   mvcDataSimStudy[[i]]$simBasis = get_basis(mvcDataSimStudy[[i]]$Ydata$sim$trans,pctVar = .99)
+#   mvcDataSimStudy[[i]]$obsBasis = get_obs_basis(mvcDataSimStudy[[i]]$simBasis,mvcDataSimStudy[[i]]$Ydata$obs$trans,YindSim,YindObs)
+#   mvcDataSimStudy[[i]]$estLS = mv_lengthscales(mvcDataSimStudy[[i]]$XTdata,mvcDataSimStudy[[i]]$simBasis$Vt,g=1e-7)
+#   mvcDataSimStudy[[i]]$SCinputs = get_SC_inputs(mvcDataSimStudy[[i]]$estLS,mvcDataSimStudy[[i]]$XTdata,mvcDataSimStudy[[i]]$simBasis$nPC)
+#   mvcDataSimStudy[[i]]$bias = F
+# }
+# save(tStar,file='simstudy/tStar.RData')
+# py_save_object(tStar,'simstudy/tStar.pkl')
+# 
+# save(mvcDataSimStudy,file='simstudy/mvcDataSimStudy_2.RData')
+# py_save_object(mvcDataSimStudy,'simstudy/mvcDataSimStudy_2.pkl')
+```
+
+# Results from updated study (#2)
+
+```{r, echo=F}
+load('simstudy/data/bd_ub_mcmc_simstudy_2.RData')
+lagp_RMSE_2 = sqrt(MSE)
+
+sepia_sim2_results = py_load_object('simstudy/data/mvcDataSimStudy_2.pkl')
+sepia_RMSE_2 = numeric(1000)
+for(i in 1:1000){
+  sepia_RMSE_2[i] = sqrt(mean((sepia_sim2_results[[i]]$tSamp - tStar[i])^2))
+}
+
+par(mfrow=c(1,3),mar=c(4,4,4,0.3))
+plot(tStar,sepia_RMSE_2,ylim=c(0.01,.2),yaxt='n',xlab='t*',ylab='RMSE',main='SEPIA');axis(2, at=c(.01,.05,.1,.15,.20), las=2)
+plot(tStar,lagp_RMSE_2,col='darkred',ylim=c(0.01,.2),xlab='t*',yaxt='n',ylab='',main='laGP');axis(2, at=c(.01,.05,.1,.15,.20), las=2)
+boxplot(sepia_RMSE_2,lagp_RMSE_2,names=c('SEPIA','laGP'),yaxt='n',ylim=c(0.01,.2),main='');axis(2, at=c(.01,.05,.1,.15,.20), las=2)
+
+hist(lagp_RMSE_1,breaks=seq(0,.2,length.out=30))
+hist(sepia_RMSE_1,add=T,breaks=seq(0,.2,length.out=30))
+
+par(mfrow=c(2,2))
+plot(tStar,lagp_RMSE_1,col='red',ylim=c(0,.2))
+plot(tStar,lagp_RMSE_2,col='red',ylim=c(0,.2))
+plot(tStar,sepia_RMSE_1,ylim=c(0,.2))
+plot(tStar,sepia_RMSE_2,ylim=c(0,.2))
+
+# now lets look at the worst laGP
+load('simstudy/data/mvcDataSimStudy_2.RData')
+ids = which(lagp_RMSE_2>.1)
+sepia_RMSE_2[ids] # sepia is having no issues with these, so these are probably situations where the observed data is especially useful for calibration
+par(mfrow=c(2,3))
+for(i in ids){
+  init = calib.init(tCalib,mvcDataSimStudy[[i]],bias=F,sample=F)
+  plot(init$theta1,init$ll,ylab='ll',xlab='t',main=i);abline(v=tStar[i])
+}
+
+# 209 is the only one that's bothering me, 897 is what we might expect to see with a beta prior on t*
+# is it again, an issue with an unlucky design?
+ii = 209
+ii = 258
+#RMSE = numeric(25)
+# for(i in 26:50){
+#   mvcDataTest = mvcDataSimStudy[[ii]]
+#   if(i==1){
+#     # use the previous design, the one that had bad results
+#     XTsim = cbind(mvcDataTest$XTdata$sim$X$orig,mvcDataTest$XTdata$sim$T$orig)
+#   } else{
+#     XTsim = dopt.gp(m, Xcand = tgp::lhs(m*10000, matrix(c(.025,.3, # cover range of Xobs
+#                             C_true-.05,C_true+.05),
+#                           nrow=pX+pT,ncol=2,byrow = T)))$XX 
+#   }
+#   Xsim=as.matrix(XTsim[,1])
+#   Tsim=as.matrix(XTsim[,2])
+#   Ysim = matrix(nrow=length(YindSim),ncol=m)
+#   for(j in 1:m){
+#     Ysim[,j] = t_at_h(C=Tsim[j],h=YindSim,R=Xsim[j],g=g_true)
+#   }
+#   mvcDataTest$XTdata = transform_xt(Xsim,Tsim,mvcDataTest$XTdata$obs$X$orig,mvcDataTest$XTdata$obs$T$orig)
+#   mvcDataTest$Ydata = transform_y(Ysim,YindSim,mvcDataTest$Ydata$obs$orig,YindObs,center = T,scale = T, scaletype='scalar')
+#   mvcDataTest$simBasis = get_basis(mvcDataTest$Ydata$sim$trans,pctVar = .99)
+#   mvcDataTest$obsBasis = get_obs_basis(mvcDataTest$simBasis,mvcDataTest$Ydata$obs$trans,YindSim,YindObs)
+#   mvcDataTest$estLS = mv_lengthscales(mvcDataTest$XTdata,mvcDataTest$simBasis$Vt,g=1e-7)
+#   mvcDataTest$SCinputs = get_SC_inputs(mvcDataTest$estLS,mvcDataTest$XTdata,mvcDataTest$simBasis$nPC)
+#   mvcDataTest$bias = F
+#   init = calib.init(tCalib,mvcDataTest,bias=F,sample=F)
+#   plot(init$theta1,init$ll,ylab='ll',xlab='t',main=i);abline(v=tStar[ii])
+#   
+#   prop.step = tune_step_sizes(mvcDataTest,50,20)
+#   mcmc.out = mcmc(mvcDataTest,tInit=.5,bias=F,nsamples=2500,nburn=1000,prop.step=prop.step)
+#   RMSE[i] = sqrt(mean((mcmc.out$t.samp - tStar[ii])^2))
+# }
+# hist(RMSE) # clearly we are in the tail of this distribution over the space of experimental designs
+# save(RMSE,file='RMSE_id258_random_ExpDesign_2.RData')
+
+load('simstudy/data/RMSE_id258_random_ExpDesign_2.RData')
+hist(RMSE,main=paste0('RMSE over random designs for t*=',round(tStar[258],4)));abline(v=lagp_RMSE_2[258],col='red')
+
+par(mfrow=c(1,2),mar=c(4,4,4,.3))
+load('simstudy/data/RMSE_id258_random_ExpDesign_2.RData')
+hist(RMSE,main=paste0('RMSE, t*=',round(tStar[258],4)))
+abline(v=c(lagp_RMSE_2[258],median(RMSE),median(lagp_RMSE_2)),col=c('darkred','darkblue','black'),lwd=2)
+#legend('topright',legend=c('bad design','q=.5 over designs','q=.5 over t*'),lty=1,col=c('darkred','darkblue','black'),lwd=2)
+load('simstudy/data/RMSE_id209_random_ExpDesign_2.RData')
+hist(RMSE,main=paste0('RMSE, t*=',round(tStar[209],4)))
+abline(v=c(lagp_RMSE_2[209],median(RMSE),median(lagp_RMSE_2)),col=c('darkred','darkblue','black'),lwd=2)
+legend('topright',legend=c('bad design','q=.5 over designs','q=.5 over t*'),lty=1,col=c('darkred','darkblue','black'),lwd=2)
+
+```
+
+# #3 create design with orthogonal array based lhs
+
+```{r, study 3}
+# load('simstudy/data/mvcDataSimStudy.RData')
+# for(i in 1:1000){
+#   # XTsim = maximinLHS()
+#   XTsim = create_oalhs(m,mvcDataSimStudy[[i]]$XTdata$pT+mvcDataSimStudy[[i]]$XTdata$pX,T,F)
+#   Xrange = c(.025,.3)
+#   Trange = c(C_true-.05,C_true+.05)
+#   Xsim=as.matrix(XTsim[,1]); Xsim = Xsim * (Xrange[2]-Xrange[1]) + Xrange[1]
+#   Tsim=as.matrix(XTsim[,2]); Tsim = Tsim * (Trange[2]-Trange[1]) + Trange[1]
+#   Ysim = matrix(nrow=length(YindSim),ncol=m)
+#   for(j in 1:m){
+#     Ysim[,j] = t_at_h(C=Tsim[j],h=YindSim,R=Xsim[j],g=g_true)
+#   }
+#   
+#   mvcDataSimStudy[[i]]$XTdata = transform_xt(Xsim,Tsim,mvcDataSimStudy[[i]]$XTdata$obs$X$orig,mvcDataSimStudy[[i]]$XTdata$obs$T$orig)
+#   mvcDataSimStudy[[i]]$Ydata = transform_y(Ysim,YindSim,mvcDataSimStudy[[i]]$Ydata$obs$orig,YindObs,center = T,scale = T, scaletype='scalar')
+#   mvcDataSimStudy[[i]]$simBasis = get_basis(mvcDataSimStudy[[i]]$Ydata$sim$trans,pctVar = .99)
+#   mvcDataSimStudy[[i]]$obsBasis = get_obs_basis(mvcDataSimStudy[[i]]$simBasis,mvcDataSimStudy[[i]]$Ydata$obs$trans,YindSim,YindObs)
+#   mvcDataSimStudy[[i]]$estLS = mv_lengthscales(mvcDataSimStudy[[i]]$XTdata,mvcDataSimStudy[[i]]$simBasis$Vt,g=1e-7)
+#   mvcDataSimStudy[[i]]$SCinputs = get_SC_inputs(mvcDataSimStudy[[i]]$estLS,mvcDataSimStudy[[i]]$XTdata,mvcDataSimStudy[[i]]$simBasis$nPC)
+#   mvcDataSimStudy[[i]]$bias = F
+# }
+# save(mvcDataSimStudy,file='simstudy/mvcDataSimStudy_3.RData')
+# py_save_object(mvcDataSimStudy,file='simstudy/mvcDataSimStudy_3.pkl')
+```
+
+```{r, point estimate #3, echo=F}
+load("~/Desktop/laGP Project/examples/ballDrop/simstudy/data/mvcDataSimStudy_578.RData")
+tHat = numeric(1000)
+tInit = matrix(seq(.1,.9,.1))
+for(i in 1:1000){
+  if(i %% 10 ==0){ cat(i) }
+  init = calib.init(tInit,mvcDataSimStudy[[i]])
+  tHat[i] = mv.calib(mvcDataSimStudy[[i]],init,nrestarts=3,sample=F)$theta.hat
+}
+save(tHat,file='simstudy/data/tHat_pt_est_m578.Rdata')
+```
+
+```{r, sim study 3 results, echo=F}
+load("~/Desktop/laGP Project/examples/ballDrop/simstudy/data/bd_ub_mcmc_simstudy_3.RData")
+lagp_RMSE_3 = sqrt(MSE)
+#plot(tStar,lagp_RMSE_3)
+median(lagp_RMSE_3) # median is slightly lower, maybe OA was useful, outliers still a problem
+sepia_sim3_results = py_load_object('simstudy/data/mvcDataSimStudy_3.pkl')
+sepia_RMSE_3 = numeric(1000)
+for(i in 1:1000){
+  sepia_RMSE_3[i] = sqrt(mean((sepia_sim3_results[[i]]$tSamp - tStar[i])^2))
+}
+#plot(tStar,sepia_RMSE_3)
+median(sepia_RMSE_3)
+
+# sim_study_3_RMSE
+par(mfrow=c(1,3),mar=c(4,4,4,0.3))
+plot(tStar,sepia_RMSE_3,ylim=c(0.01,.2),yaxt='n',xlab='t*',ylab='RMSE',main='SEPIA');axis(2, at=c(.01,.05,.1,.15,.20), las=2)
+plot(tStar,lagp_RMSE_3,col='darkred',ylim=c(0.01,.2),xlab='t*',yaxt='n',ylab='',main='laGP');axis(2, at=c(.01,.05,.1,.15,.20), las=2)
+boxplot(sepia_RMSE_3,lagp_RMSE_3,names=c('SEPIA','laGP'),yaxt='n',ylim=c(0.01,.2),main='');axis(2, at=c(.01,.05,.1,.15,.20), las=2)
+
+# is bad one multimodel again?
+ii = which.max(lagp_RMSE_3)
+load('simstudy/data/mvcDataSimStudy_3.RData')
+# for(i in 1:10){
+#   mvcDataTest = mvcDataSimStudy[[ii]]
+#   if(i==1){
+#     # use the previous design, the one that had bad results
+#     XTsim = cbind(mvcDataTest$XTdata$sim$X$orig,mvcDataTest$XTdata$sim$T$orig)
+#     Xsim=as.matrix(XTsim[,1])
+#     Tsim=as.matrix(XTsim[,2])
+#   } else{
+#     XTsim = create_oalhs(m,mvcDataTest$XTdata$pT+mvcDataTest$XTdata$pX,T,F)
+#     Xrange = c(.025,.3)
+#     Trange = c(C_true-.05,C_true+.05)
+#     Xsim=as.matrix(XTsim[,1]); Xsim = Xsim * (Xrange[2]-Xrange[1]) + Xrange[1]
+#     Tsim=as.matrix(XTsim[,2]); Tsim = Tsim * (Trange[2]-Trange[1]) + Trange[1]
+#   }
+#   
+#   Ysim = matrix(nrow=length(YindSim),ncol=m)
+#   for(j in 1:m){
+#     Ysim[,j] = t_at_h(C=Tsim[j],h=YindSim,R=Xsim[j],g=g_true)
+#   }
+#   mvcDataTest$XTdata = transform_xt(Xsim,Tsim,mvcDataTest$XTdata$obs$X$orig,mvcDataTest$XTdata$obs$T$orig)
+#   mvcDataTest$Ydata = transform_y(Ysim,YindSim,mvcDataTest$Ydata$obs$orig,YindObs,center = T,scale = T, scaletype='scalar')
+#   mvcDataTest$simBasis = get_basis(mvcDataTest$Ydata$sim$trans,pctVar = .99)
+#   mvcDataTest$obsBasis = get_obs_basis(mvcDataTest$simBasis,mvcDataTest$Ydata$obs$trans,YindSim,YindObs)
+#   mvcDataTest$estLS = mv_lengthscales(mvcDataTest$XTdata,mvcDataTest$simBasis$Vt,g=1e-7)
+#   mvcDataTest$SCinputs = get_SC_inputs(mvcDataTest$estLS,mvcDataTest$XTdata,mvcDataTest$simBasis$nPC)
+#   mvcDataTest$bias = F
+#   init = calib.init(tCalib,mvcDataTest,bias=F,sample=F)
+#   plot(init$theta1,init$ll,ylab='ll',xlab='t',main=i);abline(v=tStar[ii])
+# }
+```
+
+# Big sim study for paper, eventually at medium and small study results to show how our model converges to the sepia results for large m
+```{r m=25 results, echo=F}
+load('simstudy/data/tStar.RData')
+load("~/Desktop/laGP Project/examples/ballDrop/simstudy/data/bd_ub_mcmc_simstudy_3.RData")
+lagp_rmse_25 = sqrt(MSE)
+
+sepia_m25_results = py_load_object('simstudy/data/mvcDataSimStudy_3.pkl')
+sepia_rmse_25 = numeric(1000)
+for(i in 1:1000){
+  sepia_rmse_25[i] = sqrt(mean((sepia_m25_results[[i]]$tSamp - tStar[i])^2))
+}
+```
+
+```{r m50 results, echo=F}
+load("~/Desktop/laGP Project/examples/ballDrop/simstudy/data/bd_ub_lagp_sim_results_m50.RData")
+lagp_rmse_50 = sqrt(MSE)
+lagp_abs_50 = AbsErrMean
+
+sepia_m50_results = py_load_object('simstudy/data/bd_ub_sepia_sim_results_m50.pkl')
+sepia_rmse_50 = sqrt(rowMeans((t(sepia_m50_results) - tStar)^2))
+sepia_abs_50 = abs(colMeans(sepia_m50_results)-tStar)
+
+load('simstudy/data/tHat_pt_est_m50.Rdata')
+pt_est_abs_50 = abs(tHat-tStar)/tStar
+
+par(mfrow=c(1,2))
+boxplot(log(lagp_abs_50/tStar),log(sepia_abs_50/tStar),log(pt_est_abs_50),
+        names=c('laGP','SEPIA','mle'),ylab='log abs relative error of mean or mle',main='m=50',
+        ylim=c(-15,0))
+
+
+# 578
+load("~/Desktop/laGP Project/examples/ballDrop/simstudy/data/bd_ub_mcmc_simstudy_578_end50.RData")
+lagp_rmse_578 = sqrt(MSE)
+lagp_abs_578 = AbsErrMean
+
+load('simstudy/data/sepia_578_results/samples.RData')
+sepia_rmse_578 = sqrt(rowMeans((t(sepia_samples_578) - tStar)^2))
+sepia_abs_578 = abs(colMeans(sepia_samples_578)-tStar)
+
+load('simstudy/data/tHat_pt_est_m578.Rdata')
+pt_est_abs_578 = abs(tHat-tStar)/tStar
+boxplot(log(lagp_abs_578/tStar),log(sepia_abs_578/tStar),log(pt_est_abs_578),
+        names=c('laGP','SEPIA','MLE'),ylab='log abs relative error of mean or mle',main='m=578',
+        ylim=c(-15,0))
+```
+
+```{r m=98 results, echo=F}
+load("~/Desktop/laGP Project/examples/ballDrop/simstudy/data/bd_ub_lagp_sim_results_m98.RData")
+lagp_rmse_98 = sqrt(MSE)
+
+sepia_m98_results = py_load_object('simstudy/data/bd_ub_sepia_sim_results_m98.pkl')
+sepia_rmse_98 = sqrt(rowMeans((t(sepia_m98_results) - tStar)^2))
+```
+
+```{r m=242 results, echo=F}
+load("~/Desktop/laGP Project/examples/ballDrop/simstudy/data/bd_ub_lagp_sim_results_m242.RData")
+lagp_rmse_242 = sqrt(MSE)
+
+sepia_rmse_242 = matrix(nrow=1500,ncol=1000)
+tmp = py_load_object('simstudy/data/sepia_242_results/sepia_242_0-100.pkl')
+sepia_rmse_242[,1:100] = tmp
+for(i in 2:9){
+    tmp = py_load_object(paste0('simstudy/data/sepia_242_results/sepia_242_',i-1,'00-',i,'00.pkl'))
+    sepia_rmse_242[,((i-1)*100+1):(i*100)] = tmp
+}
+tmp = py_load_object('simstudy/data/sepia_242_results/sepia_242_900-1000.pkl')
+sepia_rmse_242[,901:1000] = tmp
+for(i in 1:1000){
+  sepia_rmse_242[,i] = (sepia_rmse_242[,i] - tStar[i])^2
+}
+sepia_rmse_242 = sqrt(colMeans(sepia_rmse_242))
+```
+
+```{r m=578 results}
+load('simstudy/data/bd_ub_mcmc_simstudy_578_end50.RData')
+lagp_rmse_578 = sqrt(MSE)
+
+sepia_rmse_578 = matrix(nrow=1500,ncol=1000)
+tmp = py_load_object('simstudy/data/sepia_578_results/sepia_578_0-100.pkl')
+sepia_rmse_578[,1:100] = tmp
+for(i in 2:9){
+    tmp = py_load_object(paste0('simstudy/data/sepia_578_results/sepia_578_',i-1,'00-',i,'00.pkl'))
+    sepia_rmse_578[,((i-1)*100+1):(i*100)] = tmp
+}
+tmp = py_load_object('simstudy/data/sepia_578_results/sepia_578_900-1000.pkl')
+sepia_rmse_578[,901:1000] = tmp
+sepia_samples_578 = sepia_rmse_578
+save(sepia_samples_578,file='simstudy/data/sepia_578_results/samples.RData')
+for(i in 1:1000){
+  sepia_rmse_578[,i] = (sepia_rmse_578[,i] - tStar[i])^2
+}
+sepia_rmse_578 = sqrt(colMeans(sepia_rmse_578))
+```
+
+```{r compare, echo=F}
+par(mfrow=c(5,3),mar=c(2,4,2,0.3))
+# first row m=25
+max = .152
+plot(tStar,sepia_rmse_25,ylim=c(0,max),yaxt='n',xlab='',ylab='RMSE m=25',main='SEPIA');axis(2, at=c(0,.05,.1,.15,.2), las=2)
+plot(tStar,lagp_rmse_25,col='firebrick',ylim=c(0,max),xlab='',yaxt='n',ylab='',main='laGP');axis(2, at=c(0,.05,.1,.15,.2), las=2)
+boxplot(lagp_rmse_25,sepia_rmse_25,names=c('laGP m=25','sepia'),main='',ylim=c(0,max))
+
+par(mfrow=c(2,4),mar=c(2,4,0.1,0.3))
+min=min(sepia_rmse_578)
+max=max(lagp_rmse_50)
+# second row m=50
+plot(tStar,sepia_rmse_50,ylim=c(min,max),yaxt='n',xlab='t*',ylab='RMSE m=50',main='');axis(2, at=c(0,.01,.02,.03,.04,.05), las=2)
+plot(tStar,lagp_rmse_50,col='firebrick',ylim=c(min,max),xlab='t*',yaxt='n',ylab='',main='');axis(2, at=c(0,.01,.02,.03,.04,.05), las=2)
+#boxplot(lagp_rmse_50,sepia_rmse_50,names=c('laGP m=50','sepia'),yaxt='n',main='');axis(2, at=c(0,.01,.02,.03,.04,.05), las=2)
+
+# third row m=98
+plot(tStar,sepia_rmse_98,ylim=c(min,max),yaxt='n',xlab='t*',ylab='RMSE m=98',main='');axis(2, at=c(0,.01,.02,.03,.04,.05), las=2)
+plot(tStar,lagp_rmse_98,col='firebrick',ylim=c(min,max),xlab='t*',yaxt='n',ylab='',main='');axis(2, at=c(0,.01,.02,.03,.04,.05), las=2)
+#boxplot(lagp_rmse_98,sepia_rmse_98,names=c('laGP','sepia'),yaxt='n',main='',ylim=c(min,max));axis(2, at=c(0,.01,.02,.03,.04,.05), las=2)
+
+# fourth row m=242
+plot(tStar,sepia_rmse_242,ylim=c(min,max),yaxt='n',xlab='t*',ylab='RMSE m=242',main='');axis(2, at=c(0,.01,.02,.03,.04,.05), las=2)
+plot(tStar,lagp_rmse_242,col='firebrick',ylim=c(min,max),xlab='t*',yaxt='n',ylab='',main='');axis(2, at=c(0,.01,.02,.03,.04,.05), las=2)
+#boxplot(lagp_rmse_242,sepia_rmse_242,names=c('laGP','sepia'),yaxt='n',main='',ylim=c(min,max));axis(2, at=c(0,.01,.02,.03,.04,.05), las=2)
+
+# fifth row m=578
+plot(tStar,sepia_rmse_578,ylim=c(min,max),yaxt='n',xlab='t*',ylab='RMSE m=578',main='');axis(2, at=c(0,.01,.02,.03,.04,.05), las=2)
+plot(tStar,lagp_rmse_578,col='firebrick',ylim=c(min,max),xlab='t*',yaxt='n',ylab='',main='');axis(2, at=c(0,.01,.02,.03,.04,.05), las=2)
+#boxplot(lagp_rmse_578,sepia_rmse_578,names=c('laGP','sepia'),main='',yaxt='n',ylim=c(min,max));axis(2, at=c(0,.01,.02,.03,.04,.05), las=2)
+
+boxplot(lagp_rmse_50,sepia_rmse_50,
+        lagp_rmse_98,sepia_rmse_98,
+        lagp_rmse_242,sepia_rmse_242,
+        lagp_rmse_578,sepia_rmse_578,
+        col=rep(c('firebrick','grey'),4),
+        names=c('lagp 50','sepia 50','lagp 98','sepia 98','lagp 242','sepia 242','lagp 578','sepia 578'),
+        ylab='rmse')
+
+# can we guess bad RMSE based on design score? ---- NO
+load("~/Desktop/laGP Project/examples/ballDrop/simstudy/data/mvcDataSimStudy_578.RData")
+design_score = numeric(1000)
+for(i in 1:1000){
+  design_score[i] = mvcDataSimStudy[[i]]$design_score
+}
+hist(design_score)
+lagp_rmse_df = data.frame(t=tStar,rmse=lagp_rmse_578,design_score=design_score)
+ggplot(lagp_rmse_df, aes(x=t, y=rmse))+geom_point(aes(col=design_score))+
+  scale_color_gradient2(low='green',mid='yellow',high='red',midpoint=(max(lagp_rmse_df$design_score)+min(lagp_rmse_df$design_score))/2,limits=c(min(lagp_rmse_df$design_score),max(lagp_rmse_df$design_score)))+ylim(c(0,.05))
+
+# what about for m=25
+for(i in 1:1000){
+  XTsim = cbind(sepia_m25_results[[i]]$XTdata$sim$X$orig,sepia_m25_results[[i]]$XTdata$sim$T$orig)
+  design_score[i] = sum(dist(XTsim,upper=T)^(-2))
+}
+lagp_rmse_df = data.frame(t=tStar,rmse=lagp_rmse_25,design_score=design_score)
+ggplot(lagp_rmse_df, aes(x=t, y=rmse))+geom_point(aes(col=design_score))+
+  scale_color_gradient2(low='green',mid='yellow',high='red',midpoint=(max(lagp_rmse_df$design_score)+min(lagp_rmse_df$design_score))/2,limits=c(min(lagp_rmse_df$design_score),max(lagp_rmse_df$design_score)))+ylim(c(0,.2))
+```

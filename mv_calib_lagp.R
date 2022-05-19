@@ -239,7 +239,7 @@ ypred_mcmc = function(XpredOrig,mvcData,tSamp,ssqSamp,support='obs',returnSample
   }
   return(returns)
 }
-ypred_mcmc_bias = function(mvcData,mcmc.out,nsamp,support='obs',returnSamples=F,start=6,end=50){
+ypred_mcmc_bias = function(mvcData,mcmc.out,support='obs',returnSamples=F,start=6,end=50){
   if(support=='obs'){
     B = mvcData$obsBasis$B
     D = mvcData$obsBasis$D
@@ -253,12 +253,12 @@ ypred_mcmc_bias = function(mvcData,mcmc.out,nsamp,support='obs',returnSamples=F,
     ysd = mvcData$Ydata$sim$sd
     nY = nrow(mvcData$Ydata$sim$orig)
   }
-  samp.id = seq(1,length(mcmc.out$ssq.samp),length.out=nsamp)
+  nsamp = dim(mcmc.out$etaPred)[1]
   ysamp = array(0,dim=c(nsamp,nY,dim(mcmc.out$etaPred)[3]))
   for(i in 1:nsamp){
-    mu = B%*%mcmc.out$etaPred[samp.id[i],,]
-    if(mvcData$bias){ mu = mu + D%*%mcmc.out$deltaPred[samp.id[i],,]}
-    sigma = mcmc.out$ssq.samp[samp.id[i]]*eye(nY)
+    mu = B%*%mcmc.out$etaPred[i,,]
+    if(mvcData$bias){ mu = mu + D%*%mcmc.out$deltaPred[i,,]}
+    sigma = mcmc.out$ssqPred[i]*eye(nY)
     for(j in 1:dim(mcmc.out$etaPred)[3]){
       ysamp[i,,j] = rmvnorm(1,mean=mu[,j],sigma=sigma) * ysd + ym
     }
@@ -819,14 +819,15 @@ mv.calib = function(mvcData,init,nrestarts=1,sample=T,optimize=T,
   return(return)
 }
 
-mcmc = function(mvcData,tInit,nsamples=100,nburn=10,prop.step=rep(.025,mvcData$XTdata$pT),verbose=F,start=6,end=50,Xpred=NULL){
-  ll_mcmc = function(theta){
+mcmc = function(mvcData,tInit,nsamples=100,nburn=10,
+                prop.step=rep(.025,mvcData$XTdata$pT),
+                verbose=F,start=6,end=50,Xpred=NULL,nPredSamples=0){
+  ll_mcmc = function(theta,predict=F){
 
     theta = matrix(theta,nrow=1)
     ll = numeric(n)
-    
     eta = NULL; delta = NULL;
-    if(!is.null(Xpred)){
+    if(!is.null(Xpred) & predict){
       etaPred = NULL
       deltaPred = NULL
     }
@@ -834,11 +835,7 @@ mcmc = function(mvcData,tInit,nsamples=100,nburn=10,prop.step=rep(.025,mvcData$X
     # transform theta by estimated length-scales
     thetaSC = lapply(1:nPC, function(j) sc_inputs(theta,mvcData$estLS$T[[j]]))
     # make prediction matrix from Xobs and theta
-    if(mvcData$SCinputs$pT>1){
-      X = lapply(1:nPC, function(j) cbind(mvcData$SCinputs$Xobs[[j]],t(replicate(n,thetaSC[[j]],simplify='matrix'))))
-    } else{
-      X = lapply(1:nPC, function(j) cbind(mvcData$SCinputs$Xobs[[j]],t(t(replicate(n,thetaSC[[j]],simplify='matrix')))))
-    }
+    X = lapply(1:nPC, function(j) cbind(mvcData$SCinputs$Xobs[[j]],matrix(rep(thetaSC[[j]],n),ncol=pT,byrow=T)))
     # Predict from emulator at [Xobs,theta]
     eta = aGPsep_SC_mv(X=mvcData$SCinputs$XTsim,
                        Z=lapply(1:nPC,function(j) mvcData$simBasis$Vt[j,]),
@@ -850,13 +847,9 @@ mcmc = function(mvcData,tInit,nsamples=100,nburn=10,prop.step=rep(.025,mvcData$X
     dim(eta$wSamp) = dim(eta$wMean)
     
     # If a new X was passed in for prediction
-    if(!is.null(Xpred)){
+    if(!is.null(Xpred) & predict){
       # cbind XpredSC to thetaSC
-      if(mvcData$SCinputs$pT>1){
-        X = lapply(1:nPC, function(j) cbind(XpredSC$Xobs[[j]],t(replicate(nrow(XpredSC$Xobs[[j]]),thetaSC[[j]],simplify='matrix'))))
-      } else{
-        X = lapply(1:nPC, function(j) cbind(XpredSC$Xobs[[j]],t(t(replicate(nrow(XpredSC$Xobs[[j]]),thetaSC[[j]],simplify='matrix')))))
-      }
+      X = lapply(1:nPC, function(j) cbind(XpredSC$Xobs[[j]],matrix(rep(thetaSC[[j]],nrow(XpredSC$Xobs[[j]])),ncol=pT,byrow = T)))
       etaPred = aGPsep_SC_mv(X=XpredSC$XTsim,
                          Z=lapply(1:nPC,function(i) mvcData$simBasis$Vt[i,]),
                          XX=X,
@@ -889,7 +882,7 @@ mcmc = function(mvcData,tInit,nsamples=100,nburn=10,prop.step=rep(.025,mvcData$X
         pred = predGPsep(delta$GPs[[k]], XX = mvcData$XTdata$obs$X$trans, lite=T)
         delta$wMean = rbind(delta$wMean, pred$mean)
         delta$wVar = rbind(delta$wVar, pred$s2)
-        if(!is.null(Xpred)){
+        if(!is.null(Xpred) & predict){
           pred = predGPsep(delta$GPs[[k]], XX = XpredStd$obs$X$trans, lite=T)
           deltaPred$wMean = rbind(deltaPred$wMean, pred$mean)
           deltaPred$wVar = rbind(deltaPred$wVar, pred$s2)
@@ -901,7 +894,7 @@ mcmc = function(mvcData,tInit,nsamples=100,nburn=10,prop.step=rep(.025,mvcData$X
       dim(delta$wSamp) = dim(delta$wMean)
       # update yDisc
       yDisc = yDisc - w_to_y(delta$wSamp,delta$basis$B)
-      if(!is.null(Xpred)){
+      if(!is.null(Xpred) & predict){
         deltaPred$wSamp = rmvnorm(1,as.numeric(deltaPred$wMean),diag(as.numeric(deltaPred$wVar)))
         dim(deltaPred$wSamp) = dim(deltaPred$wMean)
       }
@@ -913,7 +906,7 @@ mcmc = function(mvcData,tInit,nsamples=100,nburn=10,prop.step=rep(.025,mvcData$X
     Sinv = (1/ssqHat)*eye(nY)
     ll = sum(apply(yDisc,2,function(d) -.5*(ldetS + d%*%Sinv%*%d))) - log(ssqHat) + sum(dbeta(theta,2,2,log=T))
     returns = list(ll=ll,ssq=ssqHat,eta.samp=eta$wSamp,delta.samp=delta$wSamp)
-    if(!is.null(Xpred)){
+    if(!is.null(Xpred) & predict){
       returns$etaPred = etaPred
       returns$deltaPred = deltaPred
     }
@@ -924,6 +917,7 @@ mcmc = function(mvcData,tInit,nsamples=100,nburn=10,prop.step=rep(.025,mvcData$X
   n = nrow(mvcData$SCinputs$Xobs[[1]])
   nY = nrow(mvcData$Ydata$obs$orig)
   bias = mvcData$bias
+  pT = mvcData$XTdata$pT
   
   if(!is.null(Xpred)){
     # standardize Xpred
@@ -932,8 +926,10 @@ mcmc = function(mvcData,tInit,nsamples=100,nburn=10,prop.step=rep(.025,mvcData$X
                             Xpred)
     # stretch and compress Xpred
     XpredSC = get_SC_inputs(mvcData$estLS,XpredStd,nPC)
-    etaPredArr = array(dim=c(nsamples,ncol(mvcData$obsBasis$B),nrow(Xpred)))
-    if(bias){deltaPredArr = array(dim=c(nsamples,ncol(mvcData$obsBasis$D),nrow(Xpred)))}
+    etaPredArr = array(dim=c(nPredSamples,ncol(mvcData$obsBasis$B),nrow(Xpred)))
+    if(bias){deltaPredArr = array(dim=c(nPredSamples,ncol(mvcData$obsBasis$D),nrow(Xpred)))}
+    samp.ids = as.integer(seq(nburn+1,nsamples,length.out=nPredSamples))
+    ssq.samp.pred = numeric(nPredSamples)
   }
   
   ptm = proc.time()
@@ -945,15 +941,15 @@ mcmc = function(mvcData,tInit,nsamples=100,nburn=10,prop.step=rep(.025,mvcData$X
     deltaPred = llt$deltaPred$wSamp
   }
   llProp = list()
-  pT = mvcData$XTdata$pT
   accept = matrix(0,nrow=1,ncol=pT)
   t.store = matrix(nrow=nsamples,ncol=mvcData$XTdata$pT);t.store[1,] = t
   ssq.store = numeric(nsamples);ssq.store[1] = ssq
-  if(!is.null(Xpred)){
-    etaPredArr[1,,] = etaPred
-    if(bias){deltaPredArr[1,,] = deltaPred}
-  }
-
+  # if(!is.null(Xpred) & getPred){
+  #   etaPredArr[1,,] = etaPred
+  #   if(bias){deltaPredArr[1,,] = deltaPred}
+  # }
+  samp.id = 1
+  getPred = rep(F,nsamples); getPred[samp.ids] = T
   for(i in 2:nsamples){
     if(verbose){
       if(mod(i,nsamples/10)==0){cat(100*(i/nsamples),'% ')}
@@ -964,15 +960,15 @@ mcmc = function(mvcData,tInit,nsamples=100,nburn=10,prop.step=rep(.025,mvcData$X
       if(tProp[j]<0 | tProp[j]>1){
         llProp$ll = -Inf
       } else{
-        llProp = ll_mcmc(tProp)
+        llProp = ll_mcmc(tProp,getPred[i])
       }
-      llt = ll_mcmc(t)
+      llt = ll_mcmc(t,getPred[i])
       # 4. Accept or reject t
       if(log(runif(1)) < (llProp$ll - llt$ll)){
         t[j] = tProp[j]
         ssq = llProp$ssq
         accept[j] = accept[j] + 1
-        if(!is.null(Xpred)){
+        if(!is.null(Xpred) & getPred[i]){
           etaPred = llProp$etaPred$wSamp
           deltaPred = llProp$deltaPred$wSamp
         }
@@ -981,9 +977,13 @@ mcmc = function(mvcData,tInit,nsamples=100,nburn=10,prop.step=rep(.025,mvcData$X
     }
     # store ssq after both updates have been made
     ssq.store[i] = ssq
-    if(!is.null(Xpred)){
-      etaPredArr[i,,] = etaPred
-      if(bias){deltaPredArr[i,,] = deltaPred}
+    if(!is.null(Xpred) & getPred[i]){
+      #cat(dim(etaPred))
+      #cat(dim(etaPredArr[samp.id,,]))
+      etaPredArr[samp.id,,] = etaPred
+      if(bias){deltaPredArr[samp.id,,] = deltaPred}
+      ssq.samp.pred[samp.id] = ssq
+      samp.id = samp.id + 1
     }
   }
   mcmc.time = ptm-proc.time()
@@ -996,6 +996,7 @@ mcmc = function(mvcData,tInit,nsamples=100,nburn=10,prop.step=rep(.025,mvcData$X
   if(!is.null(Xpred)){
     returns$etaPred = etaPredArr
     if(bias){returns$deltaPred = deltaPredArr}
+    returns$ssqPred = ssq.samp.pred
   }
   return(returns)
 }

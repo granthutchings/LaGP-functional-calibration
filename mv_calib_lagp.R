@@ -918,6 +918,7 @@ mcmc = function(mvcData,tInit,nsamples=100,nburn=10,
   nY = nrow(mvcData$Ydata$obs$orig)
   bias = mvcData$bias
   pT = mvcData$XTdata$pT
+  getPred = rep(F,nsamples)
   
   if(!is.null(Xpred)){
     # standardize Xpred
@@ -930,6 +931,8 @@ mcmc = function(mvcData,tInit,nsamples=100,nburn=10,
     if(bias){deltaPredArr = array(dim=c(nPredSamples,ncol(mvcData$obsBasis$D),nrow(Xpred)))}
     samp.ids = as.integer(seq(nburn+1,nsamples,length.out=nPredSamples))
     ssq.samp.pred = numeric(nPredSamples)
+    samp.id = 1
+    getPred[samp.ids] = T
   }
   
   ptm = proc.time()
@@ -948,8 +951,7 @@ mcmc = function(mvcData,tInit,nsamples=100,nburn=10,
   #   etaPredArr[1,,] = etaPred
   #   if(bias){deltaPredArr[1,,] = deltaPred}
   # }
-  samp.id = 1
-  getPred = rep(F,nsamples); getPred[samp.ids] = T
+
   for(i in 2:nsamples){
     if(verbose){
       if(mod(i,nsamples/10)==0){cat(100*(i/nsamples),'% ')}

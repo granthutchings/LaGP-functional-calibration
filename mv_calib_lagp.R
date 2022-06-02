@@ -253,6 +253,7 @@ ypred_mcmc_bias = function(mvcData,mcmc.out,support='obs',returnSamples=F,start=
     ysd = mvcData$Ydata$sim$sd
     nY = nrow(mvcData$Ydata$sim$orig)
   }
+  bias = mvcData$bias
   nsamp = dim(mcmc.out$etaPred)[1]
   ysamp = array(0,dim=c(nsamp,nY,dim(mcmc.out$etaPred)[3]))
   etaSamp = array(0,dim=c(nsamp,nY,dim(mcmc.out$etaPred)[3]))
@@ -260,7 +261,7 @@ ypred_mcmc_bias = function(mvcData,mcmc.out,support='obs',returnSamples=F,start=
   
   for(i in 1:nsamp){
     etaSamp[i,,] = B%*%mcmc.out$etaPred[i,,] * ysd + ym
-    deltaSamp[i,,] = D%*%mcmc.out$deltaPred[i,,] * ysd
+    if(bias){deltaSamp[i,,] = D%*%mcmc.out$deltaPred[i,,] * ysd}
     sigma = mcmc.out$ssqPred[i]*eye(nY)
     for(j in 1:dim(mcmc.out$etaPred)[3]){
       ysamp[i,,j] = rmvnorm(1,mean=etaSamp[i,,j]+deltaSamp[i,,j],sigma=sigma)

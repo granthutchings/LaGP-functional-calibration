@@ -2,16 +2,27 @@ import pickle
 import numpy as np
 from sepia.SepiaModel import SepiaModel
 from sepia.SepiaData import SepiaData
+import sys
 
-with open('mvcDataSimStudy_3.pkl','rb') as f:
+# pass arg
+min = int(sys.argv[1])
+max = int(sys.argv[2])
+n = max-min
+m = int(sys.argv[3])
+
+load_file = 'data/mvcDataSimStudy_'+str(m)+'.pkl'
+print('loading data from',load_file,'\n')
+with open(load_file,'rb') as f:
     mvcData = pickle.load(f)
-with open('tStar.pkl','rb') as f:
+with open('data/tStar.pkl','rb') as f:
     tStar = pickle.load(f)
+save_file = 'data/bd_ub_sepia_sim_results_m'+str(m)+'.pkl'
+print('results will be saved to',save_file,'\n')
 
+tSamp = np.zeros((1500,n))
 
-for i in range(len(mvcData)):
-    if i%100==0:
-        print(i/10,'%')
+for i in range(min,max):
+    if i%(n/10)==0: print(i,'\n')
     data = SepiaData(x_sim = mvcData[i]['XTdata']['sim']['X']['orig'],
                  t_sim = mvcData[i]['XTdata']['sim']['T']['orig'],
                  y_sim = mvcData[i]['Ydata']['sim']['orig'].T,
@@ -25,7 +36,12 @@ for i in range(len(mvcData)):
     model = SepiaModel(data)
     model.tune_step_sizes(50, 20,prog=False,verbose=False)
     model.do_mcmc(2500,prog=False)
-    mvcData[i]['tSamp'] = model.get_samples(nburn=1000)['theta']
+    tSamp[:,(i-min)] = model.get_samples(nburn=1000)['theta'].squeeze()
 
-with open('mvcDataSimStudy_3.pkl','wb') as f:
-    pickle.dump(mvcData,f)
+print('saving...\n')
+
+with open('data/sepia_'+str(m)+'_'+str(min)+'-'+str(max)+'.pkl','wb') as f:
+    pickle.dump(tSamp,f)
+#with open(save_file,'wb') as f:
+#    pickle.dump(tSamp,f)
+print('done.\n')

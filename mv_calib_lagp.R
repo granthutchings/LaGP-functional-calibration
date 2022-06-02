@@ -964,7 +964,8 @@ mcmc = function(mvcData,tInit,nsamples=100,nburn=10,
   t.store = matrix(nrow=nsamples,ncol=mvcData$XTdata$pT);t.store[1,] = t
   ssq.store = numeric(nsamples);ssq.store[1] = ssq
   eta.store = array(dim=c(nsamples,dim(llt$eta.samp)));eta.store[1,,] = eta
-  delta.store = array(dim=c(nsamples,dim(llt$delta.samp)));delta.store[1,,] = delta
+  delta.store = array(dim=c(nsamples,dim(llt$delta.samp)))
+  if(bias){delta.store[1,,] = delta}
 
   for(i in 2:nsamples){
     if(verbose){
@@ -996,7 +997,7 @@ mcmc = function(mvcData,tInit,nsamples=100,nburn=10,
     # store eta,delta,ssq after both updates have been made
     ssq.store[i] = ssq
     eta.store[i,,] = eta
-    delta.store[i,,] = delta
+    if(bias){delta.store[i,,] = delta}
     
     if(!is.null(Xpred) & getPred[i]){
       etaPredArr[samp.id,,] = etaPred
@@ -1010,10 +1011,11 @@ mcmc = function(mvcData,tInit,nsamples=100,nburn=10,
   returns = list(t.samp=t.store[(nburn+1):nsamples,],
                  ssq.samp=ssq.store[(nburn+1):nsamples],
                  eta.samp=eta.store[(nburn+1):nsamples,,],
-                 delta.samp=delta.store[(nburn+1):nsamples,,],
+                 delta.samp=NA,
                  acpt.ratio=accept/nsamples,
                  time=mcmc.time,
                  prop.step=prop.step)
+  if(bias){returns$delta.samp=delta.store[(nburn+1):nsamples,,]}
   if(!is.null(Xpred)){
     returns$etaPred = etaPredArr
     if(bias){returns$deltaPred = deltaPredArr}

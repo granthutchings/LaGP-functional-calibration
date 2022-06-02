@@ -154,7 +154,7 @@ ypred_mle = function(XpredOrig,mvcData,theta,ssq,nsamples=1,support='obs',start=
     }
     yMean = apply(ySamp,c(1,3),mean)
     yVar = apply(ySamp,c(1,3),var)
-    yInt = lapply(1:n,function(i) t(apply(ySamp[,,i],1,quantile,c(.025,.975))))
+    yInt = lapply(1:n,function(i) t(apply(ySamp[,,i],1,quantile,c(.025,.975),na.rm=T)))
     return(list(ySamp=ySamp,yMean=yMean,yVar=yVar,yInt=yInt))
   } else{
     # biased prediction
@@ -175,7 +175,7 @@ ypred_mle = function(XpredOrig,mvcData,theta,ssq,nsamples=1,support='obs',start=
     yVar = apply(ySamp,c(1,3),var)
     etaMean = apply(etaSamp,c(1,3),mean)
     deltaMean = apply(deltaSamp,c(1,3),mean)
-    yInt = lapply(1:n,function(i) t(apply(ySamp[,,i],1,quantile,c(.025,.975))))
+    yInt = lapply(1:n,function(i) t(apply(ySamp[,,i],1,quantile,c(.025,.975),na.rm=T)))
     return(list(ySamp=ySamp,yMean=yMean,yVar=yVar,yInt=yInt,
                 etaMean=etaMean,deltaMean=deltaMean))
   }
@@ -232,7 +232,7 @@ ypred_mcmc = function(XpredOrig,mvcData,tSamp,ssqSamp,support='obs',returnSample
   }
   mean = apply(ysamp,2:3,mean)
   var = apply(ysamp,2:3,var)
-  conf.int = apply(ysamp,2:3,quantile,c(.025,.975))
+  conf.int = apply(ysamp,2:3,quantile,c(.025,.975),na.rm=T)
   returns = list(mean=mean,var=var,conf.int=conf.int)
   if(returnSamples){
     returns$ysamp = ysamp
@@ -255,20 +255,34 @@ ypred_mcmc_bias = function(mvcData,mcmc.out,support='obs',returnSamples=F,start=
   }
   nsamp = dim(mcmc.out$etaPred)[1]
   ysamp = array(0,dim=c(nsamp,nY,dim(mcmc.out$etaPred)[3]))
+  etaSamp = array(0,dim=c(nsamp,nY,dim(mcmc.out$etaPred)[3]))
+  deltaSamp = array(0,dim=c(nsamp,nY,dim(mcmc.out$etaPred)[3]))
+  
   for(i in 1:nsamp){
-    mu = B%*%mcmc.out$etaPred[i,,]
-    if(mvcData$bias){ mu = mu + D%*%mcmc.out$deltaPred[i,,]}
+    etaSamp[i,,] = B%*%mcmc.out$etaPred[i,,] * ysd + ym
+    deltaSamp[i,,] = D%*%mcmc.out$deltaPred[i,,] * ysd
     sigma = mcmc.out$ssqPred[i]*eye(nY)
     for(j in 1:dim(mcmc.out$etaPred)[3]){
-      ysamp[i,,j] = rmvnorm(1,mean=mu[,j],sigma=sigma) * ysd + ym
+      ysamp[i,,j] = rmvnorm(1,mean=etaSamp[i,,j]+deltaSamp[i,,j],sigma=sigma)
     }
+    # mu = B%*%mcmc.out$etaPred[i,,]
+    # if(mvcData$bias){ mu = mu + D%*%mcmc.out$deltaPred[i,,]}
+    # sigma = mcmc.out$ssqPred[i]*eye(nY)
+    # for(j in 1:dim(mcmc.out$etaPred)[3]){
+    #   ysamp[i,,j] = rmvnorm(1,mean=mu[,j],sigma=sigma) * ysd + ym
+    # }
   }
   mean = apply(ysamp,2:3,mean)
+  etaMean = apply(etaSamp,2:3,mean)
+  deltaMean = apply(deltaSamp,2:3,mean)
   var = apply(ysamp,2:3,var)
-  conf.int = apply(ysamp,2:3,quantile,c(.025,.975))
-  returns = list(mean=mean,var=var,conf.int=conf.int)
+  conf.int = apply(ysamp,2:3,quantile,c(.025,.975),na.rm=T)
+  returns = list(mean=mean,var=var,conf.int=conf.int,
+                 etaMean=etaMean,deltaMean=deltaMean)
   if(returnSamples){
     returns$ysamp = ysamp
+    returns$etaSamp = etaSamp
+    returns$deltaSamp = deltaSamp
   }
   return(returns)
 }
@@ -937,8 +951,10 @@ mcmc = function(mvcData,tInit,nsamples=100,nburn=10,
   
   ptm = proc.time()
   t = tInit
-  llt = ll_mcmc(t)
+  llt = ll_mcmc(t,T)
   ssq = llt$ssq
+  eta = llt$eta.samp
+  delta = llt$delta.samp
   if(!is.null(Xpred)){
     etaPred = llt$etaPred$wSamp
     deltaPred = llt$deltaPred$wSamp
@@ -947,10 +963,8 @@ mcmc = function(mvcData,tInit,nsamples=100,nburn=10,
   accept = matrix(0,nrow=1,ncol=pT)
   t.store = matrix(nrow=nsamples,ncol=mvcData$XTdata$pT);t.store[1,] = t
   ssq.store = numeric(nsamples);ssq.store[1] = ssq
-  # if(!is.null(Xpred) & getPred){
-  #   etaPredArr[1,,] = etaPred
-  #   if(bias){deltaPredArr[1,,] = deltaPred}
-  # }
+  eta.store = array(dim=c(nsamples,dim(llt$eta.samp)));eta.store[1,,] = eta
+  delta.store = array(dim=c(nsamples,dim(llt$delta.samp)));delta.store[1,,] = delta
 
   for(i in 2:nsamples){
     if(verbose){
@@ -969,6 +983,8 @@ mcmc = function(mvcData,tInit,nsamples=100,nburn=10,
       if(log(runif(1)) < (llProp$ll - llt$ll)){
         t[j] = tProp[j]
         ssq = llProp$ssq
+        eta = llProp$eta.samp
+        delta = llProp$delta.samp
         accept[j] = accept[j] + 1
         if(!is.null(Xpred) & getPred[i]){
           etaPred = llProp$etaPred$wSamp
@@ -977,11 +993,12 @@ mcmc = function(mvcData,tInit,nsamples=100,nburn=10,
       }
       t.store[i,j] = t[j]
     }
-    # store ssq after both updates have been made
+    # store eta,delta,ssq after both updates have been made
     ssq.store[i] = ssq
+    eta.store[i,,] = eta
+    delta.store[i,,] = delta
+    
     if(!is.null(Xpred) & getPred[i]){
-      #cat(dim(etaPred))
-      #cat(dim(etaPredArr[samp.id,,]))
       etaPredArr[samp.id,,] = etaPred
       if(bias){deltaPredArr[samp.id,,] = deltaPred}
       ssq.samp.pred[samp.id] = ssq
@@ -992,6 +1009,8 @@ mcmc = function(mvcData,tInit,nsamples=100,nburn=10,
   
   returns = list(t.samp=t.store[(nburn+1):nsamples,],
                  ssq.samp=ssq.store[(nburn+1):nsamples],
+                 eta.samp=eta.store[(nburn+1):nsamples,,],
+                 delta.samp=delta.store[(nburn+1):nsamples,,],
                  acpt.ratio=accept/nsamples,
                  time=mcmc.time,
                  prop.step=prop.step)

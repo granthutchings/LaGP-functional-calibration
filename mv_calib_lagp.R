@@ -111,16 +111,21 @@ w_to_y = function(w,B,mean=NULL,sd=NULL){
 
 # Returns predictions at X.pred.orig using the calibration parameters theta. To do this
 # the emulator must be 'fit' at theta.
-predict_w = function(X.pred.orig,mvc.data,theta=NULL,start=6,end=50,sample=F,n.samples=1){
+predict_w = function(mvc.data,X.pred.orig=NULL,theta=NULL,start=6,end=50,sample=F,n.samples=1){
   
   n.pc = mvc.data$sim.basis$n.pc
   y=NULL
+  if(!is.null(X.pred.orig)){
+    n.x.pred = nrow(X.pred.orig)
+  } else{
+    n.x.pred = 1
+  }
   
   if(!is.null(theta)){
     X = transform_xt(X.sim = mvc.data$XT.data$sim$X$orig,
                      T.sim = mvc.data$XT.data$sim$T$orig,
                      X.obs = X.pred.orig,
-                     T.obs = matrix(rep(theta,nrow(X.pred.orig)),nrow=nrow(X.pred.orig),byrow=T))
+                     T.obs = matrix(rep(theta,n.x.pred),nrow=n.x.pred,byrow=T))
     X.pred.sc = get_SC_inputs(mvc.data$est.ls,X,n.pc)
     w = aGPsep_SC_mv(X=X.pred.sc$XT.sim,
                      Z=lapply(1:n.pc,function(jj) mvc.data$sim.basis$V.t[jj,]),
@@ -156,7 +161,7 @@ predict_y = function(X.pred.orig,mvc.data,n.samples=1){
   n = nrow(X.pred.orig)
   n.y = nrow(mvc.data$sim.basis$B)
   
-  w = predict_w(X.pred.orig,mvc.data,sample=T,n.samples=n.samples)
+  w = predict_w(mvc.data,X.pred.orig,sample=T,n.samples=n.samples)
   
   y.samp = array(dim=c(n.y,n.samples,n))
   for(i in 1:n.samples){
@@ -246,7 +251,7 @@ ypred_mle = function(X.pred.orig,mvc.data,theta,ssq,n.samples=1,support='obs',st
   n = nrow(X.pred.orig)
   
   # emulator predictions
-  w = predict_w(X.pred.orig,mvc.data,theta,start=start,end=end,sample=T,n.samples)
+  w = predict_w(mvc.data,X.pred.orig,theta,start=start,end=end,sample=T,n.samples)
 
   if(!mvc.data$bias){
     # unbiased prediction
@@ -309,57 +314,85 @@ ypred_mle = function(X.pred.orig,mvc.data,theta,ssq,n.samples=1,support='obs',st
 }
 
 # this function allows prediction at an X that was not passed to do_mcmc, but does require GP objects from do_mcmc
-get_y_pred = function(X.pred.orig, mvc.data ,mcmc.out, samp.ids=0, support='obs',return.samples=F,start=6,end=50){
+get_y_pred = function(mvc.data ,mcmc.out, X.pred.orig=NULL, samp.ids=NULL, support='obs',return.samples=F,start=6,end=50){
   if(support=='obs'){
     B = mvc.data$obs.basis$B
     D = mvc.data$obs.basis$D
     ym = mvc.data$Y.data$obs$mean
     ysd = mvc.data$Y.data$obs$sd
-    n.y = nrow(mvc.data$Y.data$obs$orig)
+    n.y = mvc.data$Y.data$obs$n.y
   } else{
     B = mvc.data$sim.basis$B
     D = mvc.data$sim.basis$D
     ym = mvc.data$Y.data$sim$mean
     ysd = mvc.data$Y.data$sim$sd
-    n.y = nrow(mvc.data$Y.data$sim$orig)
+    n.y = mvc.data$Y.data$sim$n.y
   }
   bias = mvc.data$bias
-  if(samp.ids==0){
+  if(is.null(samp.ids)){
     samp.ids=mcmc.out$pred.samp.ids
   }
-  if(bias & !all(samp.ids %in% mcmc.out$pred.samp.ids)){
-    cat('For biased prediction samp.ids must be a subset of mcmc.out$pred.samp.ids. Setting samp.ids = mcmc.out$pred.samp.ids')
-    break
-  }
+  # if(isTRUE(bias) & !all(samp.ids %in% mcmc.out$pred.samp.ids)){
+  #   cat('For biased prediction samp.ids must be a subset of mcmc.out$pred.samp.ids. Setting samp.ids = mcmc.out$pred.samp.ids')
+  #   break
+  # }
   n.samples = length(samp.ids)
-  n.pred.X = nrow(X.pred.orig)
-  t.samp = as.matrix(mcmc.out$t.samp)[samp.ids,,drop=F]
-  ssq.samp = mcmc.out$ssq.samp[samp.ids]
-  eta.samp = array(0,dim=c(n.samples,n.y,n.pred.X))
-  delta.samp = array(0,dim=c(n.samples,n.y,n.pred.X))
-  y.samp = array(0,dim=c(n.samples,n.y,n.pred.X))
-  # put t.samp on original scale
-  t.samp = t(t(t.samp) * mvc.data$XT.data$sim$T$range + mvc.data$XT.data$sim$T$min)
-  for(i in 1:n.samples){
-    w = predict_w(X.pred.orig,mvc.data,t.samp[i,],sample=T,start=start,end=end)
-    eta.samp[i,,] = B%*%w$sample
-    if(bias){
-      v = mv_delta_predict(X.pred.orig,mcmc.out$v.GPs[[i]],mvc.data,sample=T,n.samples=1)
-      delta.samp[i,,] = D%*%drop(v$sample)
+  if(!is.null(X.pred.orig)){
+    n.pred.X = nrow(X.pred.orig)
+    t.samp = as.matrix(mcmc.out$t.samp)[samp.ids,,drop=F]
+    ssq.samp = mcmc.out$ssq.samp[samp.ids]
+    eta.samp = array(0,dim=c(n.samples,n.y,n.pred.X))
+    delta.samp = array(0,dim=c(n.samples,n.y,n.pred.X))
+    y.samp = array(0,dim=c(n.samples,n.y,n.pred.X))
+    # put t.samp on original scale
+    t.samp = t(t(t.samp) * mvc.data$XT.data$sim$T$range + mvc.data$XT.data$sim$T$min)
+    for(i in 1:n.samples){
+      w = predict_w(mvc.data,X.pred.orig,t.samp[i,],sample=T,start=start,end=end)
+      eta.samp[i,,] = B%*%w$sample
+      if(bias){
+        v = mv_delta_predict(X.pred.orig,mcmc.out$v.GPs[[i]],mvc.data,sample=T,n.samples=1)
+        delta.samp[i,,] = D%*%drop(v$sample)
+      }
+      sigma = ssq.samp[i]*eye(n.y)
+      for(j in 1:n.pred.X){
+        y.samp[i,,j] = rmvnorm(1,mean=eta.samp[i,,j]+delta.samp[i,,j],sigma=sigma) * ysd + ym
+      }
     }
-    sigma = ssq.samp[i]*eye(n.y)
-    for(j in 1:n.pred.X){
-      y.samp[i,,j] = rmvnorm(1,mean=eta.samp[i,,j]+delta.samp[i,,j],sigma=sigma) * ysd + ym
+    y.mean = apply(y.samp,2:3,mean)
+    eta.mean = apply(eta.samp,2:3,mean)
+    eta.conf.int = apply(eta.samp,2:3,quantile,c(.025,.975))
+    delta.mean = apply(delta.samp,2:3,mean)
+    delta.conf.int = apply(delta.samp,2:3,quantile,c(.025,.975))
+    y.var = apply(y.samp,2:3,var)
+    conf.int = apply(y.samp,2:3,quantile,c(.025,.975))
+  } else{
+    # t only model, make predictions at t samples from mcmc
+    t.samp = as.matrix(mcmc.out$t.samp)[samp.ids,,drop=F]
+    ssq.samp = mcmc.out$ssq.samp[samp.ids]
+    eta.samp = array(0,dim=c(n.samples,n.y))
+    delta.samp = array(0,dim=c(n.samples,n.y))
+    y.samp = array(0,dim=c(n.samples,n.y))
+    # put t.samp on original scale
+    t.samp = t(t(t.samp) * mvc.data$XT.data$sim$T$range + mvc.data$XT.data$sim$T$min)
+    for(i in 1:n.samples){
+      w = predict_w(mvc.data,NULL,t.samp[i,],sample=T,start=start,end=end)
+      eta.samp[i,] = B%*%w$sample
+      # if(bias){
+      #   v = mv_delta_predict(X.pred.orig,mcmc.out$v.GPs[[i]],mvc.data,sample=T,n.samples=1)
+      #   delta.samp[i,,] = D%*%drop(v$sample)
+      # }
+      sigma = ssq.samp[i]*eye(n.y)
+      y.samp[i,] = rmvnorm(1,mean=eta.samp[i,]+delta.samp[i,],sigma=sigma) * ysd + ym
     }
+    y.mean = apply(y.samp,2,mean)
+    eta.mean = apply(eta.samp,2,mean)
+    eta.conf.int = apply(eta.samp,2,quantile,c(.025,.975))
+    delta.mean = apply(delta.samp,2,mean)
+    delta.conf.int = apply(delta.samp,2,quantile,c(.025,.975))
+    y.var = apply(y.samp,2,var)
+    conf.int = apply(y.samp,2,quantile,c(.025,.975))
   }
   
-  y.mean = apply(y.samp,2:3,mean)
-  eta.mean = apply(eta.samp,2:3,mean)
-  eta.conf.int = apply(eta.samp,2:3,quantile,c(.025,.975))
-  delta.mean = apply(delta.samp,2:3,mean)
-  delta.conf.int = apply(delta.samp,2:3,quantile,c(.025,.975))
-  y.var = apply(y.samp,2:3,var)
-  conf.int = apply(y.samp,2:3,quantile,c(.025,.975))
   returns = list(mean=y.mean,var=y.var,conf.int=conf.int,
                  eta.mean=eta.mean,delta.mean=delta.mean,
                  eta.conf.int=eta.conf.int,delta.conf.int=delta.conf.int,
@@ -449,7 +482,7 @@ get_y_pred_mcmc = function(mvc.data,mcmc.out,support='obs',return.samples=F){
 }
 aGPsep_SC_mv = function(X, Z, XX, start=6, end=50, g=1/10000, bias=F, sample=F){
   n.pc = length(Z)
-  n.y = nrow(XX[[1]])
+  n.XX = nrow(XX[[1]])
 
   if(bias){
     # if we use laGP for the bias, we cannot use stretched an compressed inputs anymore
@@ -462,18 +495,18 @@ aGPsep_SC_mv = function(X, Z, XX, start=6, end=50, g=1/10000, bias=F, sample=F){
                                                verb=0))
   } else{
     lagp_fit = lapply(1:n.pc,function(i) aGPsep(X = X[[i]],
-                                               Z = Z[[i]],
-                                               XX = XX[[i]],
-                                               d = list(mle = FALSE, start = 1),
-                                               g = g,
-                                               start = start,
-                                               end = min(end,length(Z[[i]])-1),
-                                               method = 'nn',
-                                               verb=0))
+                                                Z = Z[[i]],
+                                                XX = XX[[i]],
+                                                d = list(mle = FALSE, start = 1),
+                                                g = g,
+                                                start = start,
+                                                end = min(end,length(Z[[i]])-1),
+                                                method = 'nn',
+                                                verb=0))
   }
 
-  mean = array(dim=c(n.pc,n.y))
-  var = array(dim=c(n.pc,n.y))
+  mean = array(dim=c(n.pc,n.XX))
+  var = array(dim=c(n.pc,n.XX))
   for (i in 1:n.pc) {
     mean[i,] = lagp_fit[[i]]$mean
     var[i,] = lagp_fit[[i]]$var
@@ -1110,13 +1143,9 @@ mvc_data = function(X.sim=NULL,T.sim=NULL,X.obs=NULL,T.obs=NULL,                
     data$precomp = NULL
   }
   if(small){
-    # remove the things from data that are expensive to pass around during MCMC and aren't needed
-    data$Y.data$sim = NULL
-    data$Y.data$obs$orig = NULL
-    data$XT.data$sim = NULL
-    data$sim.basis$V.t = NULL
-    data$obs.basis$V.t = NULL
-    data$SC.inputs$X.sim = NULL; data$SC.inputs$T.sim = NULL;  data$SC.inputs$T.obs = NULL
+    # remove potentially huge sim data matrices
+    data$Y.data$sim$orig = NULL
+    data$Y.data$sim$trans = NULL
   }
   
   return(data)

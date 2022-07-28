@@ -111,7 +111,7 @@ w_to_y = function(w,B,mean=NULL,sd=NULL){
 
 # Returns predictions at X.pred.orig using the calibration parameters theta. To do this
 # the emulator must be 'fit' at theta.
-predict_w = function(mvc.data,X.pred.orig=NULL,theta=NULL,start=6,end=50,sample=F,n.samples=1){
+predict_w = function(mvc.data,X.pred.orig=NULL,theta=NULL,start=6,end=50,sample=F,n.samples=1, SC=T){
   
   n.pc = mvc.data$sim.basis$n.pc
   y=NULL
@@ -126,21 +126,34 @@ predict_w = function(mvc.data,X.pred.orig=NULL,theta=NULL,start=6,end=50,sample=
                      T.sim = mvc.data$XT.data$sim$T$orig,
                      X.obs = X.pred.orig,
                      T.obs = matrix(rep(theta,n.x.pred),nrow=n.x.pred,byrow=T))
-    X.pred.sc = get_SC_inputs(mvc.data$est.ls,X,n.pc)
-    w = aGPsep_SC_mv(X=X.pred.sc$XT.sim,
+    if(SC){
+      X = get_SC_inputs(mvc.data$est.ls,X,n.pc)
+    } else{
+      X$XT.sim = cbind(X$sim$X$trans,X$sim$T$trans)
+      X$X.obs = X$obs$X$trans
+      X$T.obs = X$obs$T$trans
+    }
+    w = aGPsep_SC_mv(X=X$XT.sim,
                      Z=lapply(1:n.pc,function(jj) mvc.data$sim.basis$V.t[jj,]),
-                     XX=lapply(1:n.pc,function(i) cbind(X.pred.sc$X.obs[[i]],X.pred.sc$T.obs[[i]])),
+                     XX=lapply(1:n.pc,function(i) cbind(X$X.obs[[i]],X$T.obs[[i]])),
                      start=start,
                      end=end)
   } else{
     X = transform_xt(X.sim = mvc.data$XT.data$sim$X$orig,
                      X.obs = X.pred.orig)
-    X.pred.sc = get_SC_inputs(mvc.data$est.ls,X,n.pc)
-    w = aGPsep_SC_mv(X=X.pred.sc$XT.sim,
-                     Z=lapply(1:n.pc,function(jj) mvc.data$sim.basis$V.t[jj,]),
-                     XX=lapply(1:n.pc,function(i) X.pred.sc$X.obs[[i]]),
+    if(SC){
+      X = get_SC_inputs(mvc.data$est.ls,X,n.pc)
+      XX = lapply(1:n.pc,function(i) X$X.obs[[i]])
+      X = X$XT.sim
+    } else{
+      XX = X$obs$X$trans
+      X = cbind(X$sim$X$trans,X$sim$T$trans)
+    }
+    w = aGPsep_SC_mv(X=X,
+                     Z=mvc.data$sim.basis$V.t,
+                     XX=XX,
                      start=start,
-                     end=end)
+                     end=end,bias=mvc.data$bias,SC=SC)
   }
   
   if(sample){
@@ -156,12 +169,12 @@ predict_w = function(mvc.data,X.pred.orig=NULL,theta=NULL,start=6,end=50,sample=
   }
   return(w)
 }
-predict_y = function(X.pred.orig,mvc.data,n.samples=1){
+predict_y = function(X.pred.orig,mvc.data,n.samples=1,SC=T){
 
   n = nrow(X.pred.orig)
   n.y = nrow(mvc.data$sim.basis$B)
   
-  w = predict_w(mvc.data,X.pred.orig,sample=T,n.samples=n.samples)
+  w = predict_w(mvc.data,X.pred.orig,sample=T,n.samples=n.samples,SC=SC)
   
   y.samp = array(dim=c(n.y,n.samples,n))
   for(i in 1:n.samples){
@@ -480,29 +493,53 @@ get_y_pred_mcmc = function(mvc.data,mcmc.out,support='obs',return.samples=F){
 # mv_calib.nobias: unbiased calibration
 # mv.em.pred: laGP emulator prediction function at new inputs
 }
-aGPsep_SC_mv = function(X, Z, XX, start=6, end=50, g=1/10000, bias=F, sample=F){
-  n.pc = length(Z)
-  n.XX = nrow(XX[[1]])
+aGPsep_SC_mv = function(X, Z, XX, start=6, end=50, g=1/10000, bias=F, sample=F, SC=T){
+  n.pc = nrow(Z)
+  n.XX = ifelse(SC,nrow(XX[[1]]),nrow(XX))
 
   if(bias){
     # if we use laGP for the bias, we cannot use stretched an compressed inputs anymore
-    lagp_fit = lapply(1:n.pc,function(i) aGPsep(X = X[[i]],
-                                               Z = Z[[i]],
-                                               XX = XX[[i]],
-                                               start = start,
-                                               end = min(end,length(Z[[i]])-1),
-                                               method = 'alc',
-                                               verb=0))
+    if(SC){
+      lagp_fit = lapply(1:n.pc,function(i) aGPsep(X = X[[i]],
+                                                  Z = Z[i,],
+                                                  XX = XX[[i]],
+                                                  start = start,
+                                                  end = min(end,ncol(Z)-1),
+                                                  method = 'alc',
+                                                  verb=0))
+    } else{
+      lagp_fit = lapply(1:n.pc,function(i) aGPsep(X = X,
+                                                  Z = Z[i,],
+                                                  XX = XX,
+                                                  g = g,
+                                                  start = start,
+                                                  end = min(end,ncol(Z)-1),
+                                                  method = 'alc',
+                                                  verb=0))
+    }
+    
   } else{
-    lagp_fit = lapply(1:n.pc,function(i) aGPsep(X = X[[i]],
-                                                Z = Z[[i]],
-                                                XX = XX[[i]],
-                                                d = list(mle = FALSE, start = 1),
-                                                g = g,
-                                                start = start,
-                                                end = min(end,length(Z[[i]])-1),
-                                                method = 'nn',
-                                                verb=0))
+    if(SC){
+      d = list(mle = FALSE, start = 1)
+      lagp_fit = lapply(1:n.pc,function(i) aGPsep(X = X[[i]],
+                                                  Z = Z[i,],
+                                                  XX = XX[[i]],
+                                                  d = d,
+                                                  g = g,
+                                                  start = start,
+                                                  end = min(end,ncol(Z)-1),
+                                                  method = 'nn',
+                                                  verb=0))
+    } else{
+      lagp_fit = lapply(1:n.pc,function(i) aGPsep(X = X,
+                                                  Z = Z[i,],
+                                                  XX = XX,
+                                                  g = g,
+                                                  start = start,
+                                                  end = min(end,ncol(Z)-1),
+                                                  method = 'alc',
+                                                  verb=0))
+    }
   }
 
   mean = array(dim=c(n.pc,n.XX))
@@ -536,7 +573,7 @@ aGPsep_SC_mv = function(X, Z, XX, start=6, end=50, g=1/10000, bias=F, sample=F){
 # user when generating sim basis
 # mv_calib.bias for generating discrepancy basis
 }
-get_basis = function(Y, n.pc = 1, pct.var = NULL, full.basis=F, B=NULL){
+get_basis = function(Y, n.pc = 1, pct.var = NULL, full.basis=F, B=NULL, bias=F, D=NULL){
 
   return.list = list()
   
@@ -570,6 +607,12 @@ get_basis = function(Y, n.pc = 1, pct.var = NULL, full.basis=F, B=NULL){
     return.list$n.pc = ncol(B)
     return.list$V.t = solve(t(B)%*%B)%*%t(B)%*%Y
   }
+  
+  if(bias & is.null(D)){
+    cat('must manually specify bias basis matrix')
+    break
+  }
+  return.list$D = D
   return(return.list)
 }
 
@@ -591,12 +634,21 @@ get_obs_basis = function(sim.basis,Y.obs,y.ind.sim,y.ind.obs,sigma.y=NULL){
   obs.basis = list()
   n.pc = sim.basis$n.pc
   obs.basis$n.pc = n.pc
+  bias = ifelse(is.null(sim.basis$D),F,T)
   if(!isTRUE(all.equal(y.ind.obs,y.ind.sim))){
     B = matrix(nrow=nrow(y.ind.obs),ncol=obs.basis$n.pc)
+    if(bias){
+      D = matrix(nrow=nrow(y.ind.obs),ncol=ncol(sim.basis$D))
+    }
     if(ncol(y.ind.sim)==1){
       # 1d interpolation
       for(j in 1:n.pc){
         B[,j] = interp1(as.numeric(y.ind.sim),as.numeric(sim.basis$B[,j]),as.numeric(y.ind.obs))
+      }
+      if(bias){
+        for(j in 1:ncol(sim.basis$D)){
+          D[,j] = interp1(as.numeric(y.ind.sim),as.numeric(sim.basis$D[,j]),as.numeric(y.ind.obs))
+        }
       }
     } else if(ncol(y.ind.sim)==2){
       # 2d interpolation
@@ -605,11 +657,21 @@ get_obs_basis = function(sim.basis,Y.obs,y.ind.sim,y.ind.obs,sigma.y=NULL){
       for(i in 1:n.pc){
         B[,i] = interp2(x,y,matrix(sim.basis$B[,i],length(y),length(x),byrow = F),xp,yp)
       }
+      if(bias){
+        for(j in 1:ncol(sim.basis$D)){
+          D[,j] = interp2(x,y,matrix(sim.basis$D[,j],length(y),length(x),byrow = F),xp,yp)
+        }
+      }
     }
     obs.basis$B = B
+    if(bias){obs.basis$D=D}
   } else{
     cat('setting Bobs==Bsim \n')
     obs.basis$B = sim.basis$B
+    if(bias){
+      cat('setting Dobs==Dsim \n')
+      obs.basis$D = sim.basis$D
+    }
   }
   # compute V.t
   # Bridge = 1e-6 * diag(rep(1,n.pc)) # in case Bprod is ill-conditioned
@@ -631,7 +693,7 @@ get_obs_basis = function(sim.basis,Y.obs,y.ind.sim,y.ind.obs,sigma.y=NULL){
 # X (numeric) : untransformed matrix of inputs
 # V.t (numeric) : matrix 
 # ls_prior_ab (numeric) : 2 vector of parameters for gamma prior on length-scales
-mv_lengthscales = function(XT.data,V.t,g=1e-7,subsample=F,subsample.size=100,seed=NULL){
+mv_lengthscales = function(XT.data,V.t,g=1e-7,subsample=F,subsample.size=100,seed=NULL,ls.prior=F){
   ptm = proc.time()
   XT = cbind(XT.data$sim$X$trans,XT.data$sim$T$trans)
   if(subsample){
@@ -646,7 +708,7 @@ mv_lengthscales = function(XT.data,V.t,g=1e-7,subsample=F,subsample.size=100,see
   p.t = XT.data$p.t
   n.pc = nrow(V.t)
   
-  dConfig = darg(list(mle = TRUE, max = 100), XT)
+  dConfig = darg(d=list(mle = TRUE, max = 100),X = XT)
   GPlist = vector(mode='list',length=n.pc)
   for(i in 1:n.pc){
     GPlist[[i]] = newGPsep(X = XT,
@@ -655,12 +717,19 @@ mv_lengthscales = function(XT.data,V.t,g=1e-7,subsample=F,subsample.size=100,see
                            g = g,
                            dK = TRUE)
   }
-  estLenscales = mclapply(1:n.pc, function(i) mleGPsep(GPlist[[i]],param='d',
-                                                     tmin = dConfig$min, 
-                                                     tmax = dConfig$max,
-                                                     ab=dConfig$ab,
-                                                     maxit=200)$d,
-                          mc.cores = parallel::detectCores())
+  if(ls.prior){
+    estLenscales = mclapply(1:n.pc, function(i) mleGPsep(GPlist[[i]],param='d',
+                                                         tmin = dConfig$min,
+                                                         tmax = dConfig$max,
+                                                         ab=dConfig$ab,
+                                                         maxit=100)$d, 
+                            mc.cores = parallel::detectCores())
+  } else{
+    estLenscales = mclapply(1:n.pc, function(i) mleGPsep(GPlist[[i]],param='d',
+                                                         maxit=100)$d, 
+                            mc.cores = parallel::detectCores())
+  }
+
   for(i in n.pc){
     deleteGPsep(GPlist[[i]])
   }
@@ -1092,24 +1161,24 @@ interval_score_snomadr = function(theta,mvc.data,sample=T,n.samples=100,start=6,
 
 mvc_data = function(X.sim=NULL,T.sim=NULL,X.obs=NULL,T.obs=NULL,                                # X and T data
                     Y.sim,y.ind.sim=NULL,Y.obs=NULL,y.ind.obs=NULL,center=T,scaletype='scalar', # Y data
-                    n.pc = 1, pct.var = NULL, B.sim = NULL, sigma.y=NULL,                       # sim basis
-                    sc.nugget=1e-7, sc.subsample = T, sc.subsample.size = 250,                  # length scale estimation
-                    bias=F,small=T,precomp=T){
-  cat('transforming X, T \n')
+                    n.pc = 1, pct.var = NULL, B = NULL, sigma.y=NULL,                           # sim basis
+                    sc.nugget=1e-7, sc.subsample = T, sc.subsample.size = 250, ls.prior=F,      # length scale estimation
+                    bias=F,D=NULL,small=T,precomp=T,verbose=F){
+  if(verbose){cat('transforming X, T \n')}
   XT.data = transform_xt(X.sim,T.sim,X.obs,T.obs)
-  cat('transforming Y \n')
+  if(verbose){cat('transforming Y \n')}
   Y.data = transform_y(Y.sim,y.ind.sim,Y.obs,y.ind.obs,center,T,scaletype)
-  cat('computing sim basis \n')
-  sim.basis = get_basis(Y.data$sim$trans,n.pc,pct.var,F,B.sim)
+  if(verbose){cat('computing sim basis \n')}
+  sim.basis = get_basis(Y.data$sim$trans,n.pc,pct.var,F,B,bias=bias,D=D)
   if(!is.null(Y.obs)){
-    cat('computing obs basis \n')
+    if(verbose){cat('computing obs basis \n')}
     obs.basis = get_obs_basis(sim.basis,Y.data$obs$trans,y.ind.sim,y.ind.obs,sigma.y)
   } else{
     obs.basis = NULL
   }
-  cat('estimating lengthscale parameters \n')
-  est.ls = mv_lengthscales(XT.data,sim.basis$V.t,sc.nugget,sc.subsample,sc.subsample.size)
-  cat('stretching and compressing inputs \n')
+  if(verbose){cat('estimating lengthscale parameters \n')}
+  est.ls = mv_lengthscales(XT.data,sim.basis$V.t,sc.nugget,sc.subsample,sc.subsample.size,ls.prior=ls.prior)
+  if(verbose){cat('stretching and compressing inputs \n')}
   SC.inputs = get_SC_inputs(est.ls,XT.data,sim.basis$n.pc)
   
   data = list(XT.data=XT.data,
@@ -1121,7 +1190,7 @@ mvc_data = function(X.sim=NULL,T.sim=NULL,X.obs=NULL,T.obs=NULL,                
               bias=bias)
   
   if(precomp){
-    cat('precomputing for fast calibration \n')
+    if(verbose){cat('precomputing for fast calibration \n')}
     # do precomputing necessary for calibration
     precomp = list()
     precomp$I.n.y = eye(Y.data$obs$n.y)
@@ -1366,7 +1435,7 @@ mv_calib_is = function(mvc.data,init,nrestarts=1,sample=T,optimize=T,n.samples=1
 
 do_mcmc = function(mvc.data,t.init,n.samples=100,n.burn=0,
                    prop.step=rep(.2,mvc.data$XT.data$p.t),
-                   verbose=F,start.eta=6,end.eta=50,
+                   verbose=T,start.eta=6,end.eta=50,
                    laGP.delta=F,start.delta=6,end.delta=50,
                    X.pred=NULL,n.pred.samples=0,adapt=F){
   
@@ -1486,9 +1555,9 @@ do_mcmc = function(mvc.data,t.init,n.samples=100,n.burn=0,
       if(mod(i,100)==0){
         acpt.ratio = colSums(accept[(i-99):i,])/100
         for(jj in 1:p.t){
-          if(acpt.ratio[jj]<.35 & prop.step[jj]>.05){
+          if(acpt.ratio[jj]<.42 & prop.step[jj]>.05){
             prop.step[jj]=.9*prop.step[jj]
-          } else if(acpt.ratio[jj]>.45 & prop.step[jj]<1){
+          } else if(acpt.ratio[jj]>.46 & prop.step[jj]<1){
             prop.step[jj]=1.1*prop.step[jj]
           }
         }
@@ -1523,16 +1592,16 @@ do_mcmc = function(mvc.data,t.init,n.samples=100,n.burn=0,
 add_samples = function(mvc.data,mcmc.out,n.samples=100,
                        verbose=F,start.eta=6,end.eta=50,
                        laGP.delta=F,start.delta=6,end.delta=50,
-                       X.pred=NULL,n.pred.samples=0){
+                       X.pred=NULL,n.pred.samples=0,adapt=T){
   # start mcmc at previous sample and use same proposal step
   add.samples = do_mcmc(mvc.data,mcmc.out$t.samp[nrow(mcmc.out$t.samp),],n.samples,0,mcmc.out$prop.step,verbose,
-                        start.eta,end.eta,laGP.delta,start.delta,end.delta,X.pred,n.pred.samples)
+                        start.eta,end.eta,laGP.delta,start.delta,end.delta,X.pred,n.pred.samples,adapt=adapt)
 
   mcmc.out$t.samp = rbind(mcmc.out$t.samp,add.samples$t.samp)
   mcmc.out$ssq.samp = c(mcmc.out$ssq.samp,add.samples$ssq.samp)
-  mcmc.out$w.samp = rbind(mcmc.out$w.samp,add.samples$w.samp)
+  mcmc.out$w.samp = abind::abind(mcmc.out$w.samp,add.samples$w.samp,along=1)
   if(mvc.data$bias){
-    mcmc.out$v.samp = rbind(mcmc.out$v.samp,add.samples$v.samp)
+    mcmc.out$v.samp = abind::abind(mcmc.out$v.samp,add.samples$v.samp,along=1)
     mcmc.out$v.GPs = append(mcmc.out$v.GPs,add.samples$v.GPs)
   }
   # acceptance ratio is weighted avg of number of samples
@@ -1649,7 +1718,7 @@ fit_eta = function(theta,mvc.data,
   }
 
   w = aGPsep_SC_mv(X=mvc.data$SC.inputs$XT.sim,
-                   Z=mvc.data$precomp$Z,
+                   Z=mvc.data$sim.basis$V.t,
                    XX=XT.sc,
                    start=start,
                    end=end,
